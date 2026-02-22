@@ -6,7 +6,6 @@ import wgpu
 
 from .constants import BG_COLOR, CURSOR_COLOR, CURSOR_GAP_COLUMNS
 from .shader import CURSOR_SHADER, SWEEP_SHADER
-from .sweep_buffer import SweepBuffer
 
 
 class GPURenderer:
@@ -232,8 +231,8 @@ class GPURenderer:
 
         self._initialized = True
 
-    def update_and_draw(self, buf: SweepBuffer) -> None:
-        """Upload data from SweepBuffer to GPU and render one frame."""
+    def update_and_draw(self, buf) -> None:
+        """Upload data from buffer to GPU and render one frame."""
         if self.needs_setup(buf.n_visible, buf.n_columns, buf.version):
             self.setup(buf.n_visible, buf.n_columns, buf.version)
             # Full upload after setup

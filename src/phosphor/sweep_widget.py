@@ -12,7 +12,7 @@ from .channel_plot import ChannelPlotWidget
 from .constants import DEFAULT_DISPLAY_DUR, DEFAULT_N_COLUMNS, DEFAULT_N_VISIBLE
 from .gpu_renderer import GPURenderer
 from .sweep_buffer import SweepBuffer
-from .time_axis import TimeAxisWidget
+from .x_axis import XAxisWidget
 
 __all__ = ["SweepConfig", "SweepWidget"]
 
@@ -47,7 +47,7 @@ class SweepWidget(ChannelPlotWidget):
         self._config = config
 
         # Time axis labels (sweep-specific, added below the canvas)
-        self._time_axis = TimeAxisWidget(config.display_dur, parent=self)
+        self._time_axis = XAxisWidget(config.display_dur, unit="s", parent=self)
         self.layout().addWidget(self._time_axis)
 
         # CPU-side buffer
@@ -90,7 +90,7 @@ class SweepWidget(ChannelPlotWidget):
             buf.set_n_visible(new_vis)
         if config.display_dur != buf.display_dur:
             buf.set_display_dur(config.display_dur)
-            self._time_axis.set_display_dur(config.display_dur)
+            self._time_axis.set_range(config.display_dur)
         self._update_range_label()
 
     # ------------------------------------------------------------------
@@ -109,11 +109,11 @@ class SweepWidget(ChannelPlotWidget):
 
         if key == Qt.Key.Key_Comma:
             buf.set_display_dur(buf.display_dur / 2.0)  # halve duration
-            self._time_axis.set_display_dur(buf.display_dur)
+            self._time_axis.set_range(buf.display_dur)
             self._update_range_label()
         elif key == Qt.Key.Key_Period:
             buf.set_display_dur(buf.display_dur * 2.0)  # double duration
-            self._time_axis.set_display_dur(buf.display_dur)
+            self._time_axis.set_range(buf.display_dur)
             self._update_range_label()
         else:
             super()._handle_key(key)
