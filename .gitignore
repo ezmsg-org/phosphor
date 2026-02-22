@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+uv.lock
+*.local.json
+src/phosphor/__version__.py
+
+# Sphinx documentation
+docs/_build/
+docs/build/
+docs/source/_build
+docs/source/generated
+docs/source/api/generated
