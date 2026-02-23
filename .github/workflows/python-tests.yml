@@ -1,0 +1,36 @@
+name: Test package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+        os:
+          - "ubuntu-latest"
+          - "windows-latest"
+          - "macos-latest"
+    runs-on: ${{matrix.os}}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install the project
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv tool run ruff check --output-format=github src
+
+#      - name: Run tests
+#        run: uv run pytest tests

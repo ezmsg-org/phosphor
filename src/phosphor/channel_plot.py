@@ -19,13 +19,13 @@ class ChannelPlotWidget(QWidget):
 
     Subclass contract:
     - Set ``self._buffer`` to a buffer object before calling ``_init_rendering()``.
-      Expected interface: ``.n_visible``, ``.n_channels``, ``.channel_offset``,
-      ``.set_channel_offset(int)``, ``.set_n_visible(int)``,
-      ``.adjust_y_scale(float)``, ``.toggle_autoscale()``.
+    Expected interface: ``.n_visible``, ``.n_channels``, ``.channel_offset``,
+    ``.set_channel_offset(int)``, ``.set_n_visible(int)``,
+    ``.adjust_y_scale(float)``, ``.toggle_autoscale()``.
     - Add axis widgets to ``self.layout()`` after ``super().__init__``.
     - Implement ``_draw_frame(self)`` (called by rendercanvas scheduler).
     - Override ``_handle_key(key)`` to intercept subclass keys, calling
-      ``super()._handle_key(key)`` for common keys.
+    ``super()._handle_key(key)`` for common keys.
     """
 
     def __init__(
