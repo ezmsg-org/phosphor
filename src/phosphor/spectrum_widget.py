@@ -93,18 +93,12 @@ class SpectrumWidget(ChannelPlotWidget):
         self._display_freq_max = min(self._display_freq_max, self._nyquist)
 
         buf = self.spectrum_buffer
-        needs_realloc = False
         if config.n_channels != buf.n_channels:
-            buf.n_channels = config.n_channels
-            needs_realloc = True
+            buf.set_n_channels(config.n_channels)
 
         new_vis = min(config.n_visible, config.n_channels)
         if new_vis != buf.n_visible:
             buf.set_n_visible(new_vis)
-            needs_realloc = False
-
-        if needs_realloc:
-            buf._allocate()
 
         self._sync_display()
 

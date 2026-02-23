@@ -82,7 +82,7 @@ class SweepWidget(ChannelPlotWidget):
         self._channel_labels = config.channel_labels
         buf = self.sweep_buffer
         if config.n_channels != buf.n_channels:
-            buf.n_channels = config.n_channels
+            buf.set_n_channels(config.n_channels)
         if config.srate != buf.srate:
             buf.set_srate(config.srate)
         new_vis = min(config.n_visible, config.n_channels)

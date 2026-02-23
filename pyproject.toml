@@ -5,7 +5,7 @@ authors = [
   { name = "Chadwick Boulay", email = "chadwick.boulay@gmail.com" },
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = [
     "numpy>=2.4.2",

@@ -24,6 +24,7 @@ class SweepBuffer:
         self.n_channels = n_channels
         self.srate = srate
         self.display_dur = display_dur
+        self._configured_n_columns = n_columns
         self.n_columns = n_columns
         self.n_visible = min(n_visible, n_channels)
         self.channel_offset = 0
@@ -43,6 +44,7 @@ class SweepBuffer:
     def _allocate(self):
         """Allocate / reallocate all internal buffers."""
         self.total_raw_samples = max(int(round(self.srate * self.display_dur)), 1)
+        self.n_columns = min(self._configured_n_columns, self.total_raw_samples)
         self.samples_per_column = self.total_raw_samples / self.n_columns
 
         self.raw_buffer = np.zeros((self.total_raw_samples, self.n_visible), dtype=np.float32)
@@ -125,6 +127,14 @@ class SweepBuffer:
 
             # Mark dirty
             self._mark_dirty(first_col, last_col)
+
+    def set_n_channels(self, n: int) -> None:
+        with self._lock:
+            if n != self.n_channels:
+                self.n_channels = n
+                self.n_visible = min(self.n_visible, self.n_channels)
+                self.channel_offset = min(self.channel_offset, max(0, self.n_channels - self.n_visible))
+                self._allocate()
 
     def set_channel_offset(self, offset: int) -> None:
         with self._lock:
@@ -218,11 +228,10 @@ class SweepBuffer:
     def get_channel_params(self) -> np.ndarray:
         """Per-channel y_offset and RGBA color. Shape (n_visible * 8,) float32."""
         params = np.zeros((self.n_visible, 8), dtype=np.float32)
-        ys = self.y_scale
+        # ys = self.y_scale
         for i in range(self.n_visible):
             y_center = 1.0 - (2.0 * (i + 0.5)) / self.n_visible
-            mean_off = float(self.ew_mean[i] * ys) if self.ew_mean is not None else 0.0
-            params[i, 0] = y_center - mean_off
+            params[i, 0] = y_center
             c = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
             params[i, 4] = c[0]
             params[i, 5] = c[1]

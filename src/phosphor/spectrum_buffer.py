@@ -109,6 +109,14 @@ class SpectrumBuffer:
             self._dirty_end = self.n_bins - 1
             self._version += 1
 
+    def set_n_channels(self, n: int) -> None:
+        with self._lock:
+            if n != self.n_channels:
+                self.n_channels = n
+                self.n_visible = min(self.n_visible, self.n_channels)
+                self.channel_offset = min(self.channel_offset, max(0, self.n_channels - self.n_visible))
+                self._allocate()
+
     def set_channel_offset(self, offset: int) -> None:
         with self._lock:
             offset = max(0, min(offset, self.n_channels - self.n_visible))
