@@ -84,6 +84,22 @@ python -m phosphor --channels 256 --srate 30000 --visible 64 --dur 2.0
 | `A`                     | Toggle autoscale                          |
 | `,` / `.`               | Halve / double display duration           |
 
+## Future: Migration to fastplotlib
+
+Phosphor currently uses custom WGSL shaders and raw wgpu-py for rendering. The plan is to
+migrate to [fastplotlib](https://github.com/fastplotlib/fastplotlib) (built on
+[pygfx](https://github.com/pygfx/pygfx)) once both libraries reach 1.0 (targeting mid-2026),
+which would eliminate the custom shader maintenance burden. The migration can happen in stages:
+
+1. **Keep `SweepBuffer`** -- the CPU-side circular buffer with incremental min/max downsampling
+   is the core of phosphor's performance story. Neither pygfx nor fastplotlib provide built-in
+   min/max downsampling for line data, so this logic stays.
+2. **Replace `GPURenderer` + WGSL shaders** with fastplotlib's `LineStack`, feeding it the
+   already-downsampled min/max columns from `SweepBuffer`. This drops the custom pipeline/shader
+   code and gains fastplotlib's built-in axes, colormapping, and interaction tools.
+3. **Evaluate whether `ChannelPlotWidget`** can be simplified or replaced by fastplotlib's
+   `Figure`/`Subplot` layout, retaining the keyboard controls and channel pagination UX.
+
 ## Development
 
 We use [`uv`](https://docs.astral.sh/uv/) for development.
