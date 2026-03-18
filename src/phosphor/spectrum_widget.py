@@ -5,12 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from .channel_plot import ChannelPlotWidget
-from .constants import DEFAULT_N_VISIBLE
-from .gpu_renderer import GPURenderer
+from .constants import CHANNEL_COLORS, DEFAULT_N_VISIBLE
 from .spectrum_buffer import SpectrumBuffer
 from .x_axis import XAxisWidget
 
@@ -62,8 +60,10 @@ class SpectrumWidget(ChannelPlotWidget):
         )
         self._buffer = self.spectrum_buffer
 
-        # GPU renderer
-        self.gpu_renderer = GPURenderer(self.canvas)
+        # Create initial graphics
+        self._cached_version = -1
+        self._line_stack = None
+        self._setup_graphics()
 
         # Start rendering
         self._init_rendering()
@@ -103,38 +103,82 @@ class SpectrumWidget(ChannelPlotWidget):
         self._sync_display()
 
     # ------------------------------------------------------------------
-    # Rendering
+    # Graphics setup
     # ------------------------------------------------------------------
 
-    def _draw_frame(self) -> None:
-        self.gpu_renderer.update_and_draw(self.spectrum_buffer)
+    def _setup_graphics(self) -> None:
+        """Create or recreate LineStack."""
+        subplot = self._subplot
+
+        if self._line_stack is not None:
+            subplot.delete_graphic(self._line_stack)
+            self._line_stack = None
+
+        buf = self.spectrum_buffer
+        data = buf.get_linestack_data(self._display_freq_max)
+
+        n_vis = buf.n_visible
+        colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
+
+        self._line_stack = subplot.add_line_stack(
+            data,
+            colors=colors,
+            separation=1.0,
+            separation_axis="y",
+        )
+
+        self._cached_version = buf.version
+
+    # ------------------------------------------------------------------
+    # Rendering (animation callback)
+    # ------------------------------------------------------------------
+
+    def _update_graphics(self) -> None:
+        buf = self.spectrum_buffer
+
+        if buf.version != self._cached_version:
+            self._setup_graphics()
+            return
+
+        # Incremental update
+        result = buf.get_dirty_linestack_range(self._display_freq_max)
+        if result is not None:
+            data_slice, bin_start, n_bins = result
+            idx_start = bin_start * 2
+            idx_end = (bin_start + n_bins) * 2
+            for ch in range(buf.n_visible):
+                self._line_stack[ch].data[idx_start:idx_end] = data_slice[ch]
 
     # ------------------------------------------------------------------
     # Keyboard controls
     # ------------------------------------------------------------------
 
-    def _handle_key(self, key: int) -> None:
-        if key == Qt.Key.Key_Comma:
-            # Halve frequency range
-            new_max = max(self._display_freq_max / 2.0, self._freq_min * 4)
-            if new_max != self._display_freq_max:
-                self._display_freq_max = new_max
-                self._sync_display()
-        elif key == Qt.Key.Key_Period:
-            # Double frequency range
-            new_max = min(self._display_freq_max * 2.0, self._nyquist)
-            if new_max != self._display_freq_max:
-                self._display_freq_max = new_max
-                self._sync_display()
-        elif key == Qt.Key.Key_L:
+    def _on_key_down(self, key: str) -> None:
+        if key == ",":
+            self._freq_zoom(0.5)
+        elif key == ".":
+            self._freq_zoom(2.0)
+        elif key in ("l", "L"):
             self._log_x = not self._log_x
             self._sync_display()
         else:
-            super()._handle_key(key)
+            super()._on_key_down(key)
+
+    def _on_ctrl_scroll(self, delta: float) -> None:
+        factor = 0.5 if delta > 0 else 2.0
+        self._freq_zoom(factor)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _freq_zoom(self, factor: float) -> None:
+        new_max = self._display_freq_max * factor
+        new_max = max(new_max, self._freq_min * 4)
+        new_max = min(new_max, self._nyquist)
+        if new_max != self._display_freq_max:
+            self._display_freq_max = new_max
+            self._sync_display()
 
     def _linear_display_bins(self) -> int:
         """Number of linear bins covering 0 .. _display_freq_max."""
