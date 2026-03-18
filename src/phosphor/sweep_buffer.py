@@ -150,7 +150,7 @@ class SweepBuffer:
                 self._allocate()
 
     # ------------------------------------------------------------------
-    # Properties and LineStack data (called from render/UI thread)
+    # Properties and MultiLine data (called from render/UI thread)
     # ------------------------------------------------------------------
 
     @property
@@ -161,13 +161,13 @@ class SweepBuffer:
         """Compute normalization scale from current buffer data.
 
         Uses the max absolute value across all display columns/channels so
-        that normalized data fits within ±0.5, matching LineStack separation.
+        that normalized data fits within ±0.5, matching MultiLine z_offset_scale separation.
         Must be called while holding ``_lock``.
         """
         max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
         return 0.5 / max(max_abs, 1e-12)
 
-    def _build_linestack_array(self, mins, maxs, col_indices, scale) -> np.ndarray:
+    def _build_multiline_array(self, mins, maxs, col_indices, scale) -> np.ndarray:
         """Build a ``[n_visible, 2*n_cols, 3]`` array from min/max slices.
 
         Must be called while holding ``_lock``.
@@ -179,17 +179,18 @@ class SweepBuffer:
         out[:, 1::2, 0] = col_x[np.newaxis, :]
         out[:, 0::2, 1] = mins.T * scale
         out[:, 1::2, 1] = maxs.T * scale
+        out[:, :, 2] = np.arange(self.n_visible)[:, np.newaxis]
         return out
 
-    def get_linestack_data(self) -> np.ndarray:
-        """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib LineStack.
+    def get_multiline_data(self) -> np.ndarray:
+        """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib MultiLineGraphic.
 
         Y-coordinates are normalized so the max absolute value maps to ±0.5,
-        matching LineStack separation=1.0 and preventing channel overlap.
+        and Z-coordinates encode channel index for z_offset_scale separation.
         """
         with self._lock:
             self._y_scale = self._compute_y_scale()
-            out = self._build_linestack_array(
+            out = self._build_multiline_array(
                 self.display_mins,
                 self.display_maxs,
                 np.arange(self.n_columns),
@@ -199,7 +200,7 @@ class SweepBuffer:
             self._dirty_end = None
             return out
 
-    def get_dirty_linestack_range(self) -> tuple[np.ndarray, int, int] | None:
+    def get_dirty_multiline_range(self) -> tuple[np.ndarray, int, int] | None:
         """Incremental update for dirty column range.
 
         Returns ``(data_slice, col_start, n_cols)`` or ``None`` if clean.
@@ -215,7 +216,7 @@ class SweepBuffer:
             if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
                 # Full update with new scale
                 self._y_scale = new_scale
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins,
                     self.display_maxs,
                     np.arange(self.n_columns),
@@ -232,7 +233,7 @@ class SweepBuffer:
 
             if end >= start:
                 n_cols = end - start + 1
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins[start : end + 1],
                     self.display_maxs[start : end + 1],
                     np.arange(start, end + 1),
@@ -242,7 +243,7 @@ class SweepBuffer:
             else:
                 # Wrapped — full update
                 self._y_scale = new_scale
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins,
                     self.display_maxs,
                     np.arange(self.n_columns),

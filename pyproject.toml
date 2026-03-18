@@ -8,7 +8,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = [
-    "fastplotlib>=0.6.1",
+    "fastplotlib",
     "numpy>=2.4.2",
     "pyside6>=6.10.2",
 ]
@@ -63,3 +63,6 @@ select = ["E", "F", "I", "W"]
 [tool.ruff.lint.isort]
 known-first-party = ["ezmsg.sigproc"]
 known-third-party = ["ezmsg", "ezmsg.baseproc"]
+
+[tool.uv.sources]
+fastplotlib = { git = "https://github.com/pperanich/fastplotlib.git", rev = "feature/multi-line-graphic" }
