@@ -7,12 +7,19 @@ import numpy as np
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from phosphor import SpectrumConfig, SpectrumWidget, SweepConfig, SweepWidget
+from phosphor import (
+    ScatterConfig,
+    ScatterWidget,
+    SpectrumConfig,
+    SpectrumWidget,
+    SweepConfig,
+    SweepWidget,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Phosphor renderer demo")
-    parser.add_argument("--mode", choices=["sweep", "spectrum"], default="sweep", help="Render mode")
+    parser.add_argument("--mode", choices=["sweep", "spectrum", "scatter"], default="sweep", help="Render mode")
     parser.add_argument("--channels", type=int, default=128, help="Total channels")
     parser.add_argument("--srate", type=float, default=30000.0, help="Sample rate (Hz)")
     parser.add_argument("--dur", type=float, default=2.0, help="Display duration (s)")
@@ -27,7 +34,31 @@ def main():
     chunk_size = max(1, int(args.srate / 60))  # ~500 samples per timer tick
     sample_counter = 0
 
-    if args.mode == "spectrum":
+    if args.mode == "scatter":
+        n_ch = args.channels
+        # Generate positions on a unit circle
+        angles = np.linspace(0, 2 * np.pi, n_ch, endpoint=False)
+        positions = np.column_stack([np.cos(angles), np.sin(angles)]).astype(np.float32)
+        labels = [f"E{i}" for i in range(n_ch)]
+        config = ScatterConfig(
+            positions=positions,
+            cmap="viridis",
+            modulate_color=True,
+            modulate_size=True,
+            channel_labels=labels,
+        )
+        widget = ScatterWidget(config)
+        widget.setWindowTitle("Phosphor Demo — Scatter")
+        phase = 0.0
+
+        def push_chunk():
+            nonlocal phase
+            # Rotating wave around the circle
+            values = (np.sin(angles + phase) * 0.5 + 0.5).astype(np.float32)
+            widget.push_data(values)
+            phase += 0.05
+
+    elif args.mode == "spectrum":
         fft_size = int(args.srate)
         n_bins = fft_size // 2
         config = SpectrumConfig(
