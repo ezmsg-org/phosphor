@@ -99,7 +99,7 @@ class ChannelPlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _update_graphics(self) -> None:
-        """Update LineStack data each frame. Called from animation callback."""
+        """Update MultiLine data each frame. Called from animation callback."""
         raise NotImplementedError
 
     def _on_ctrl_scroll(self, delta: float) -> None:
@@ -186,7 +186,7 @@ class ChannelPlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _handle_mouse_move(self, event) -> None:
-        if self._line_stack is None:
+        if self._multi_line is None:
             return
         buf = self._buffer
 
@@ -196,11 +196,11 @@ class ChannelPlotWidget(QWidget):
             return
         wy = float(world[1])
 
-        # Find the nearest line by comparing world Y positions
+        # Find the nearest line by comparing computed Y positions
         best_idx = 0
         best_dist = float("inf")
         for i in range(buf.n_visible):
-            line_y = float(self._line_stack[i].world_object.world.position[1])
+            line_y = i * self._z_offset_scale
             dist = abs(wy - line_y)
             if dist < best_dist:
                 best_dist = dist

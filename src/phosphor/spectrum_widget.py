@@ -62,7 +62,8 @@ class SpectrumWidget(ChannelPlotWidget):
 
         # Create initial graphics
         self._cached_version = -1
-        self._line_stack = None
+        self._multi_line = None
+        self._z_offset_scale = 1.0
         self._setup_graphics()
 
         # Start rendering
@@ -107,24 +108,24 @@ class SpectrumWidget(ChannelPlotWidget):
     # ------------------------------------------------------------------
 
     def _setup_graphics(self) -> None:
-        """Create or recreate LineStack."""
+        """Create or recreate MultiLineGraphic."""
         subplot = self._subplot
 
-        if self._line_stack is not None:
-            subplot.delete_graphic(self._line_stack)
-            self._line_stack = None
+        if self._multi_line is not None:
+            subplot.delete_graphic(self._multi_line)
+            self._multi_line = None
 
         buf = self.spectrum_buffer
-        data = buf.get_linestack_data(self._display_freq_max)
+        data = buf.get_multiline_data(self._display_freq_max)
 
         n_vis = buf.n_visible
         colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
 
-        self._line_stack = subplot.add_line_stack(
+        self._multi_line = subplot.add_multi_line(
             data,
             colors=colors,
-            separation=1.0,
-            separation_axis="y",
+            z_offset_scale=self._z_offset_scale,
+            thickness=1.5,
         )
 
         self._cached_version = buf.version
@@ -141,13 +142,12 @@ class SpectrumWidget(ChannelPlotWidget):
             return
 
         # Incremental update
-        result = buf.get_dirty_linestack_range(self._display_freq_max)
+        result = buf.get_dirty_multiline_range(self._display_freq_max)
         if result is not None:
             data_slice, bin_start, n_bins = result
             idx_start = bin_start * 2
             idx_end = (bin_start + n_bins) * 2
-            for ch in range(buf.n_visible):
-                self._line_stack[ch].data[idx_start:idx_end] = data_slice[ch]
+            self._multi_line.data[:, idx_start:idx_end] = data_slice
 
     # ------------------------------------------------------------------
     # Keyboard controls

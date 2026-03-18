@@ -115,7 +115,7 @@ class SpectrumBuffer:
                 self._allocate()
 
     # ------------------------------------------------------------------
-    # Properties and LineStack data
+    # Properties and MultiLine data
     # ------------------------------------------------------------------
 
     @property
@@ -127,7 +127,7 @@ class SpectrumBuffer:
         max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
         return 0.5 / max(max_abs, 1e-12)
 
-    def _build_linestack_array(self, mins, maxs, bin_indices, freq_max, scale) -> np.ndarray:
+    def _build_multiline_array(self, mins, maxs, bin_indices, freq_max, scale) -> np.ndarray:
         """Build a ``[n_visible, 2*n_bins, 3]`` array. Must hold ``_lock``."""
         n_bins = mins.shape[0]
         out = np.zeros((self.n_visible, 2 * n_bins, 3), dtype=np.float32)
@@ -136,23 +136,25 @@ class SpectrumBuffer:
         out[:, 1::2, 0] = bin_x[np.newaxis, :]
         out[:, 0::2, 1] = mins.T * scale
         out[:, 1::2, 1] = maxs.T * scale
+        out[:, :, 2] = np.arange(self.n_visible)[:, np.newaxis]
         return out
 
-    def get_linestack_data(self, freq_max: float) -> np.ndarray:
-        """Full data shaped ``[n_visible, 2*n_bins, 3]`` for fastplotlib LineStack.
+    def get_multiline_data(self, freq_max: float) -> np.ndarray:
+        """Full data shaped ``[n_visible, 2*n_bins, 3]`` for fastplotlib MultiLineGraphic.
 
         Y-coordinates are normalized so the max absolute value maps to ±0.5.
+        Z-coordinates encode channel index for z_offset_scale separation.
         """
         with self._lock:
             self._y_scale = self._compute_y_scale()
-            out = self._build_linestack_array(
+            out = self._build_multiline_array(
                 self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
             )
             self._dirty_start = None
             self._dirty_end = None
             return out
 
-    def get_dirty_linestack_range(self, freq_max: float) -> tuple[np.ndarray, int, int] | None:
+    def get_dirty_multiline_range(self, freq_max: float) -> tuple[np.ndarray, int, int] | None:
         """Incremental update for dirty bin range.
 
         Returns ``(data_slice, bin_start, n_bins)`` or ``None`` if clean.
@@ -167,7 +169,7 @@ class SpectrumBuffer:
 
             if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
                 self._y_scale = new_scale
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
                 )
                 self._dirty_start = None
@@ -181,7 +183,7 @@ class SpectrumBuffer:
 
             if end >= start:
                 n_bins = end - start + 1
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins[start : end + 1],
                     self.display_maxs[start : end + 1],
                     np.arange(start, end + 1),
@@ -191,7 +193,7 @@ class SpectrumBuffer:
                 return out, start, n_bins
             else:
                 self._y_scale = new_scale
-                out = self._build_linestack_array(
+                out = self._build_multiline_array(
                     self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
                 )
                 return out, 0, self.n_bins

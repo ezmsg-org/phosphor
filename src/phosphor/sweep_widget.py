@@ -67,7 +67,8 @@ class SweepWidget(ChannelPlotWidget):
 
         # Create initial graphics
         self._cached_version = -1
-        self._line_stack = None
+        self._multi_line = None
+        self._z_offset_scale = 1.0
         self._cursor_line = None
         self._setup_graphics()
 
@@ -104,38 +105,38 @@ class SweepWidget(ChannelPlotWidget):
     # ------------------------------------------------------------------
 
     def _setup_graphics(self) -> None:
-        """Create or recreate LineStack and cursor line."""
+        """Create or recreate MultiLineGraphic and cursor line."""
         subplot = self._subplot
 
         # Delete old graphics
-        if self._line_stack is not None:
-            subplot.delete_graphic(self._line_stack)
-            self._line_stack = None
+        if self._multi_line is not None:
+            subplot.delete_graphic(self._multi_line)
+            self._multi_line = None
         if self._cursor_line is not None:
             subplot.delete_graphic(self._cursor_line)
             self._cursor_line = None
 
         buf = self.sweep_buffer
-        data = buf.get_linestack_data()
+        data = buf.get_multiline_data()
 
         # Build per-channel colors (cycling through CHANNEL_COLORS)
         n_vis = buf.n_visible
         colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
 
-        self._line_stack = subplot.add_line_stack(
+        self._multi_line = subplot.add_multi_line(
             data,
             colors=colors,
-            separation=1.0,
-            separation_axis="y",
+            z_offset_scale=self._z_offset_scale,
+            thickness=1.5,
         )
 
         # Cursor: vertical line at the sweep position.
-        # Span the LineStack's y-extent with small margin.
+        # Span the MultiLine's y-extent with small margin.
         sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
         cursor_color = CURSOR_COLOR[:3]
         gap_w = CURSOR_GAP_COLUMNS / max(buf.n_columns - 1, 1) * buf.display_dur
-        y_bottom = self._line_stack[0].world_object.world.position[1]
-        y_top = self._line_stack[-1].world_object.world.position[1]
+        y_bottom = 0.0
+        y_top = (n_vis - 1) * self._z_offset_scale
         margin = max((y_top - y_bottom) * 0.05, 0.5)
         self._cursor_y_min = y_bottom - margin
         self._cursor_y_max = y_top + margin
@@ -163,15 +164,14 @@ class SweepWidget(ChannelPlotWidget):
             return
 
         # Incremental update from dirty columns
-        result = buf.get_dirty_linestack_range()
+        result = buf.get_dirty_multiline_range()
         if result is not None:
             data_slice, col_start, n_cols = result
             idx_start = col_start * 2
             idx_end = (col_start + n_cols) * 2
-            for ch in range(buf.n_visible):
-                self._line_stack[ch].data[idx_start:idx_end] = data_slice[ch]
+            self._multi_line.data[:, idx_start:idx_end] = data_slice
 
-        # Update cursor x-position; y spans the LineStack extent (not camera,
+        # Update cursor x-position; y spans the MultiLine extent (not camera,
         # which would create a feedback loop with auto_scale).
         sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
         self._cursor_line.data[0] = [sweep_x, self._cursor_y_min, 0]
