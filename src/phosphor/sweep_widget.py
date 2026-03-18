@@ -5,12 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from .channel_plot import ChannelPlotWidget
-from .constants import DEFAULT_DISPLAY_DUR, DEFAULT_N_COLUMNS, DEFAULT_N_VISIBLE
-from .gpu_renderer import GPURenderer
+from .constants import (
+    CHANNEL_COLORS,
+    CURSOR_COLOR,
+    CURSOR_GAP_COLUMNS,
+    DEFAULT_DISPLAY_DUR,
+    DEFAULT_N_COLUMNS,
+    DEFAULT_N_VISIBLE,
+)
 from .sweep_buffer import SweepBuffer
 from .x_axis import XAxisWidget
 
@@ -60,10 +65,11 @@ class SweepWidget(ChannelPlotWidget):
         )
         self._buffer = self.sweep_buffer
 
-        # Create GPU renderer eagerly so the wgpu context exists
-        # before the first draw (rendercanvas's _draw_and_present
-        # cancels the draw if context is None).
-        self.gpu_renderer = GPURenderer(self.canvas)
+        # Create initial graphics
+        self._cached_version = -1
+        self._line_stack = None
+        self._cursor_line = None
+        self._setup_graphics()
 
         # Start rendering
         self._init_rendering()
@@ -94,26 +100,101 @@ class SweepWidget(ChannelPlotWidget):
         self._update_range_label()
 
     # ------------------------------------------------------------------
-    # Rendering
+    # Graphics setup
     # ------------------------------------------------------------------
 
-    def _draw_frame(self) -> None:
-        self.gpu_renderer.update_and_draw(self.sweep_buffer)
+    def _setup_graphics(self) -> None:
+        """Create or recreate LineStack and cursor line."""
+        subplot = self._subplot
+
+        # Delete old graphics
+        if self._line_stack is not None:
+            subplot.delete_graphic(self._line_stack)
+            self._line_stack = None
+        if self._cursor_line is not None:
+            subplot.delete_graphic(self._cursor_line)
+            self._cursor_line = None
+
+        buf = self.sweep_buffer
+        data = buf.get_linestack_data()
+
+        # Build per-channel colors (cycling through CHANNEL_COLORS)
+        n_vis = buf.n_visible
+        colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
+
+        self._line_stack = subplot.add_line_stack(
+            data,
+            colors=colors,
+            separation=1.0,
+            separation_axis="y",
+        )
+
+        # Cursor: vertical line at the sweep position.
+        # Span the LineStack's y-extent with small margin.
+        sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
+        cursor_color = CURSOR_COLOR[:3]
+        gap_w = CURSOR_GAP_COLUMNS / max(buf.n_columns - 1, 1) * buf.display_dur
+        y_bottom = self._line_stack[0].world_object.world.position[1]
+        y_top = self._line_stack[-1].world_object.world.position[1]
+        margin = max((y_top - y_bottom) * 0.05, 0.5)
+        self._cursor_y_min = y_bottom - margin
+        self._cursor_y_max = y_top + margin
+        self._cursor_line = subplot.add_line(
+            np.array(
+                [[sweep_x, self._cursor_y_min, 0], [sweep_x, self._cursor_y_max, 0]],
+                dtype=np.float32,
+            ),
+            colors=cursor_color,
+            thickness=max(1.0, gap_w * 2),
+        )
+
+        self._cached_version = buf.version
+
+    # ------------------------------------------------------------------
+    # Rendering (animation callback)
+    # ------------------------------------------------------------------
+
+    def _update_graphics(self) -> None:
+        buf = self.sweep_buffer
+
+        if buf.version != self._cached_version:
+            # Version changed (scroll, resize, display_dur change) → full rebuild
+            self._setup_graphics()
+            return
+
+        # Incremental update from dirty columns
+        result = buf.get_dirty_linestack_range()
+        if result is not None:
+            data_slice, col_start, n_cols = result
+            idx_start = col_start * 2
+            idx_end = (col_start + n_cols) * 2
+            for ch in range(buf.n_visible):
+                self._line_stack[ch].data[idx_start:idx_end] = data_slice[ch]
+
+        # Update cursor x-position; y spans the LineStack extent (not camera,
+        # which would create a feedback loop with auto_scale).
+        sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
+        self._cursor_line.data[0] = [sweep_x, self._cursor_y_min, 0]
+        self._cursor_line.data[1] = [sweep_x, self._cursor_y_max, 0]
 
     # ------------------------------------------------------------------
     # Keyboard controls (sweep-specific keys)
     # ------------------------------------------------------------------
 
-    def _handle_key(self, key: int) -> None:
-        buf = self.sweep_buffer
-
-        if key == Qt.Key.Key_Comma:
-            buf.set_display_dur(buf.display_dur / 2.0)  # halve duration
-            self._time_axis.set_range(buf.display_dur)
-            self._update_range_label()
-        elif key == Qt.Key.Key_Period:
-            buf.set_display_dur(buf.display_dur * 2.0)  # double duration
-            self._time_axis.set_range(buf.display_dur)
-            self._update_range_label()
+    def _on_key_down(self, key: str) -> None:
+        if key == ",":
+            self._time_zoom(0.5)
+        elif key == ".":
+            self._time_zoom(2.0)
         else:
-            super()._handle_key(key)
+            super()._on_key_down(key)
+
+    def _on_ctrl_scroll(self, delta: float) -> None:
+        factor = 0.5 if delta > 0 else 2.0
+        self._time_zoom(factor)
+
+    def _time_zoom(self, factor: float) -> None:
+        buf = self.sweep_buffer
+        buf.set_display_dur(buf.display_dur * factor)
+        self._time_axis.set_range(buf.display_dur)
+        self._update_range_label()

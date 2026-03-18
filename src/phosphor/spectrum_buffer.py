@@ -4,19 +4,12 @@ import threading
 
 import numpy as np
 
-from .constants import (
-    AUTOSCALE_N_SIGMA,
-    AUTOSCALE_TIME_CONSTANT,
-    CHANNEL_COLORS,
-)
-
 
 class SpectrumBuffer:
     """Thin storage buffer for pre-computed magnitude spectra.
 
-    Duck-types the interface expected by :class:`GPURenderer` and
-    :class:`ChannelPlotWidget` so both sweep and spectrum can share the
-    same rendering pipeline.
+    Duck-types the interface expected by :class:`ChannelPlotWidget` so both
+    sweep and spectrum widgets can share the same base class.
     """
 
     def __init__(self, n_channels: int, n_bins: int, n_visible: int = 64):
@@ -25,16 +18,13 @@ class SpectrumBuffer:
         self.n_visible = min(n_visible, n_channels)
         self.channel_offset = 0
 
-        self.autoscale_enabled = True
-        self._manual_y_scale: float | None = None
-
         self._lock = threading.Lock()
         self._version = 0
 
         self._allocate()
 
     # ------------------------------------------------------------------
-    # Alias so GPURenderer sees n_columns
+    # Alias so widgets can use n_columns generically
     # ------------------------------------------------------------------
 
     @property
@@ -49,23 +39,10 @@ class SpectrumBuffer:
         self.display_mins = np.zeros((self.n_bins, self.n_visible), dtype=np.float32)
         self.display_maxs = np.zeros((self.n_bins, self.n_visible), dtype=np.float32)
 
-        self.ew_mean: np.ndarray | None = None
-        self.ew_sq_mean: np.ndarray | None = None
-
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
 
         self._version += 1
-
-    # ------------------------------------------------------------------
-    # Sweep-cursor stub (pushed offscreen)
-    # ------------------------------------------------------------------
-
-    @property
-    def sweep_col(self) -> int:
-        """Return a value outside the valid column range so the cursor quad
-        is clipped offscreen."""
-        return self.n_bins * 2
 
     # ------------------------------------------------------------------
     # Public mutators
@@ -102,8 +79,6 @@ class SpectrumBuffer:
             self.display_mins[:] = vis
             self.display_maxs[:] = vis
 
-            self._update_autoscale(vis)
-
             # Mark entire buffer dirty
             self._dirty_start = 0
             self._dirty_end = self.n_bins - 1
@@ -139,42 +114,65 @@ class SpectrumBuffer:
                 self.n_bins = n_bins
                 self._allocate()
 
-    def adjust_y_scale(self, factor: float) -> None:
-        with self._lock:
-            self._manual_y_scale = self.y_scale * factor
-            self.autoscale_enabled = False
-
-    def toggle_autoscale(self) -> None:
-        with self._lock:
-            self.autoscale_enabled = not self.autoscale_enabled
-
     # ------------------------------------------------------------------
-    # Properties and GPU data
+    # Properties and LineStack data
     # ------------------------------------------------------------------
-
-    @property
-    def y_scale(self) -> float:
-        if not self.autoscale_enabled and self._manual_y_scale is not None:
-            return self._manual_y_scale
-        return self._compute_y_scale()
 
     @property
     def version(self) -> int:
         return self._version
 
-    def get_gpu_data(self) -> np.ndarray:
+    def _compute_y_scale(self) -> float:
+        """Compute normalization scale. Must be called while holding ``_lock``."""
+        max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
+        return 0.5 / max(max_abs, 1e-12)
+
+    def _build_linestack_array(self, mins, maxs, bin_indices, freq_max, scale) -> np.ndarray:
+        """Build a ``[n_visible, 2*n_bins, 3]`` array. Must hold ``_lock``."""
+        n_bins = mins.shape[0]
+        out = np.zeros((self.n_visible, 2 * n_bins, 3), dtype=np.float32)
+        bin_x = bin_indices.astype(np.float32) / max(self.n_bins - 1, 1) * freq_max
+        out[:, 0::2, 0] = bin_x[np.newaxis, :]
+        out[:, 1::2, 0] = bin_x[np.newaxis, :]
+        out[:, 0::2, 1] = mins.T * scale
+        out[:, 1::2, 1] = maxs.T * scale
+        return out
+
+    def get_linestack_data(self, freq_max: float) -> np.ndarray:
+        """Full data shaped ``[n_visible, 2*n_bins, 3]`` for fastplotlib LineStack.
+
+        Y-coordinates are normalized so the max absolute value maps to ±0.5.
+        """
         with self._lock:
-            gpu = np.empty((self.n_bins, self.n_visible, 2), dtype=np.float32)
-            gpu[:, :, 0] = self.display_mins
-            gpu[:, :, 1] = self.display_maxs
+            self._y_scale = self._compute_y_scale()
+            out = self._build_linestack_array(
+                self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
+            )
             self._dirty_start = None
             self._dirty_end = None
-            return gpu.reshape(-1)
+            return out
 
-    def get_dirty_gpu_data(self) -> tuple[np.ndarray, int, int] | None:
+    def get_dirty_linestack_range(self, freq_max: float) -> tuple[np.ndarray, int, int] | None:
+        """Incremental update for dirty bin range.
+
+        Returns ``(data_slice, bin_start, n_bins)`` or ``None`` if clean.
+        If the scale changed significantly, returns a full-buffer update.
+        """
         with self._lock:
             if self._dirty_start is None:
                 return None
+
+            new_scale = self._compute_y_scale()
+            old_scale = getattr(self, "_y_scale", new_scale)
+
+            if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
+                self._y_scale = new_scale
+                out = self._build_linestack_array(
+                    self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
+                )
+                self._dirty_start = None
+                self._dirty_end = None
+                return out, 0, self.n_bins
 
             start = self._dirty_start
             end = self._dirty_end
@@ -182,57 +180,18 @@ class SpectrumBuffer:
             self._dirty_end = None
 
             if end >= start:
-                n_cols = end - start + 1
-                gpu = np.empty((n_cols, self.n_visible, 2), dtype=np.float32)
-                gpu[:, :, 0] = self.display_mins[start : end + 1]
-                gpu[:, :, 1] = self.display_maxs[start : end + 1]
-                return gpu.reshape(-1), start, n_cols
+                n_bins = end - start + 1
+                out = self._build_linestack_array(
+                    self.display_mins[start : end + 1],
+                    self.display_maxs[start : end + 1],
+                    np.arange(start, end + 1),
+                    freq_max,
+                    old_scale,
+                )
+                return out, start, n_bins
             else:
-                gpu = np.empty((self.n_bins, self.n_visible, 2), dtype=np.float32)
-                gpu[:, :, 0] = self.display_mins
-                gpu[:, :, 1] = self.display_maxs
-                return gpu.reshape(-1), 0, self.n_bins
-
-    def get_channel_params(self) -> np.ndarray:
-        params = np.zeros((self.n_visible, 8), dtype=np.float32)
-        ys = self.y_scale
-        for i in range(self.n_visible):
-            y_center = 1.0 - (2.0 * (i + 0.5)) / self.n_visible
-            mean_off = float(self.ew_mean[i] * ys) if self.ew_mean is not None else 0.0
-            params[i, 0] = y_center - mean_off
-            c = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
-            params[i, 4] = c[0]
-            params[i, 5] = c[1]
-            params[i, 6] = c[2]
-            params[i, 7] = c[3]
-        return params.reshape(-1)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _update_autoscale(self, vis_data: np.ndarray) -> None:
-        clean = np.nan_to_num(vis_data, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
-        batch_mean = np.mean(clean, axis=0)
-        batch_sq_mean = np.mean(clean**2, axis=0)
-
-        # Use a fixed time constant equivalent — treat each push as 1 update
-        alpha = 1.0 - np.exp(-1.0 / AUTOSCALE_TIME_CONSTANT)
-
-        if self.ew_mean is None:
-            self.ew_mean = batch_mean.copy()
-            self.ew_sq_mean = batch_sq_mean.copy()
-        else:
-            self.ew_mean += alpha * (batch_mean - self.ew_mean)
-            self.ew_sq_mean += alpha * (batch_sq_mean - self.ew_sq_mean)
-
-    def _compute_y_scale(self) -> float:
-        if self.ew_mean is None:
-            return 1.0 / max(self.n_visible, 1)
-        var = self.ew_sq_mean - self.ew_mean**2
-        var = np.maximum(var, 0.0)
-        sigma = np.sqrt(var)
-        mean_sigma = float(np.mean(sigma))
-        if mean_sigma < 1e-12:
-            return 1.0 / max(self.n_visible, 1)
-        return 1.0 / (AUTOSCALE_N_SIGMA * mean_sigma * self.n_visible)
+                self._y_scale = new_scale
+                out = self._build_linestack_array(
+                    self.display_mins, self.display_maxs, np.arange(self.n_bins), freq_max, self._y_scale
+                )
+                return out, 0, self.n_bins

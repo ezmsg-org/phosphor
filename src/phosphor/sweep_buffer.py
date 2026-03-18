@@ -1,15 +1,9 @@
-"""CPU-side circular buffer with incremental min/max downsampling and autoscale."""
+"""CPU-side circular buffer with incremental min/max downsampling."""
 
 import threading
 import warnings
 
 import numpy as np
-
-from .constants import (
-    AUTOSCALE_N_SIGMA,
-    AUTOSCALE_TIME_CONSTANT,
-    CHANNEL_COLORS,
-)
 
 
 class SweepBuffer:
@@ -28,9 +22,6 @@ class SweepBuffer:
         self.n_columns = n_columns
         self.n_visible = min(n_visible, n_channels)
         self.channel_offset = 0
-
-        self.autoscale_enabled = True
-        self._manual_y_scale: float | None = None
 
         self._lock = threading.Lock()
         self._version = 0
@@ -53,9 +44,6 @@ class SweepBuffer:
 
         self.write_pos = 0
         self.sweep_col = 0
-
-        self.ew_mean: np.ndarray | None = None
-        self.ew_sq_mean: np.ndarray | None = None
 
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
@@ -93,9 +81,6 @@ class SweepBuffer:
             if n_samples > self.total_raw_samples:
                 vis_data = vis_data[-self.total_raw_samples :]
                 n_samples = self.total_raw_samples
-
-            # Update autoscale statistics
-            self._update_autoscale(vis_data)
 
             # Track column range before writing
             first_col = self._col_for_pos(self.write_pos)
@@ -164,48 +149,81 @@ class SweepBuffer:
                 self.srate = srate
                 self._allocate()
 
-    def adjust_y_scale(self, factor: float) -> None:
-        """Multiply y_scale by factor and disable autoscale."""
-        with self._lock:
-            self._manual_y_scale = self.y_scale * factor
-            self.autoscale_enabled = False
-
-    def toggle_autoscale(self) -> None:
-        with self._lock:
-            self.autoscale_enabled = not self.autoscale_enabled
-
     # ------------------------------------------------------------------
-    # Properties and GPU data (called from render/UI thread)
+    # Properties and LineStack data (called from render/UI thread)
     # ------------------------------------------------------------------
-
-    @property
-    def y_scale(self) -> float:
-        if not self.autoscale_enabled and self._manual_y_scale is not None:
-            return self._manual_y_scale
-        return self._compute_y_scale()
 
     @property
     def version(self) -> int:
         return self._version
 
-    def get_gpu_data(self) -> np.ndarray:
-        """Full upload: interleave min/max into column-major flat array."""
+    def _compute_y_scale(self) -> float:
+        """Compute normalization scale from current buffer data.
+
+        Uses the max absolute value across all display columns/channels so
+        that normalized data fits within ±0.5, matching LineStack separation.
+        Must be called while holding ``_lock``.
+        """
+        max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
+        return 0.5 / max(max_abs, 1e-12)
+
+    def _build_linestack_array(self, mins, maxs, col_indices, scale) -> np.ndarray:
+        """Build a ``[n_visible, 2*n_cols, 3]`` array from min/max slices.
+
+        Must be called while holding ``_lock``.
+        """
+        n_cols = mins.shape[0]
+        out = np.zeros((self.n_visible, 2 * n_cols, 3), dtype=np.float32)
+        col_x = col_indices.astype(np.float32) / max(self.n_columns - 1, 1) * self.display_dur
+        out[:, 0::2, 0] = col_x[np.newaxis, :]
+        out[:, 1::2, 0] = col_x[np.newaxis, :]
+        out[:, 0::2, 1] = mins.T * scale
+        out[:, 1::2, 1] = maxs.T * scale
+        return out
+
+    def get_linestack_data(self) -> np.ndarray:
+        """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib LineStack.
+
+        Y-coordinates are normalized so the max absolute value maps to ±0.5,
+        matching LineStack separation=1.0 and preventing channel overlap.
+        """
         with self._lock:
-            gpu = np.empty((self.n_columns, self.n_visible, 2), dtype=np.float32)
-            gpu[:, :, 0] = self.display_mins
-            gpu[:, :, 1] = self.display_maxs
+            self._y_scale = self._compute_y_scale()
+            out = self._build_linestack_array(
+                self.display_mins,
+                self.display_maxs,
+                np.arange(self.n_columns),
+                self._y_scale,
+            )
             self._dirty_start = None
             self._dirty_end = None
-            return gpu.reshape(-1)
+            return out
 
-    def get_dirty_gpu_data(self) -> tuple[np.ndarray, int, int] | None:
-        """Partial upload for dirty column range.
+    def get_dirty_linestack_range(self) -> tuple[np.ndarray, int, int] | None:
+        """Incremental update for dirty column range.
 
-        Returns (flat_data, col_start, n_cols) or None if nothing dirty.
+        Returns ``(data_slice, col_start, n_cols)`` or ``None`` if clean.
+        If the scale changed significantly, returns a full-buffer update.
         """
         with self._lock:
             if self._dirty_start is None:
                 return None
+
+            # Check if scale drifted significantly
+            new_scale = self._compute_y_scale()
+            old_scale = getattr(self, "_y_scale", new_scale)
+            if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
+                # Full update with new scale
+                self._y_scale = new_scale
+                out = self._build_linestack_array(
+                    self.display_mins,
+                    self.display_maxs,
+                    np.arange(self.n_columns),
+                    self._y_scale,
+                )
+                self._dirty_start = None
+                self._dirty_end = None
+                return out, 0, self.n_columns
 
             start = self._dirty_start
             end = self._dirty_end
@@ -214,30 +232,23 @@ class SweepBuffer:
 
             if end >= start:
                 n_cols = end - start + 1
-                gpu = np.empty((n_cols, self.n_visible, 2), dtype=np.float32)
-                gpu[:, :, 0] = self.display_mins[start : end + 1]
-                gpu[:, :, 1] = self.display_maxs[start : end + 1]
-                return gpu.reshape(-1), start, n_cols
+                out = self._build_linestack_array(
+                    self.display_mins[start : end + 1],
+                    self.display_maxs[start : end + 1],
+                    np.arange(start, end + 1),
+                    old_scale,
+                )
+                return out, start, n_cols
             else:
-                # Wrapped — upload full buffer
-                gpu = np.empty((self.n_columns, self.n_visible, 2), dtype=np.float32)
-                gpu[:, :, 0] = self.display_mins
-                gpu[:, :, 1] = self.display_maxs
-                return gpu.reshape(-1), 0, self.n_columns
-
-    def get_channel_params(self) -> np.ndarray:
-        """Per-channel y_offset and RGBA color. Shape (n_visible * 8,) float32."""
-        params = np.zeros((self.n_visible, 8), dtype=np.float32)
-        # ys = self.y_scale
-        for i in range(self.n_visible):
-            y_center = 1.0 - (2.0 * (i + 0.5)) / self.n_visible
-            params[i, 0] = y_center
-            c = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
-            params[i, 4] = c[0]
-            params[i, 5] = c[1]
-            params[i, 6] = c[2]
-            params[i, 7] = c[3]
-        return params.reshape(-1)
+                # Wrapped — full update
+                self._y_scale = new_scale
+                out = self._build_linestack_array(
+                    self.display_mins,
+                    self.display_maxs,
+                    np.arange(self.n_columns),
+                    self._y_scale,
+                )
+                return out, 0, self.n_columns
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -262,32 +273,6 @@ class SweepBuffer:
                 # Replace NaN results (all-NaN columns) with 0
                 self.display_mins[col] = np.nan_to_num(mins, nan=0.0)
                 self.display_maxs[col] = np.nan_to_num(maxs, nan=0.0)
-
-    def _update_autoscale(self, new_data: np.ndarray) -> None:
-        clean = np.nan_to_num(new_data, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
-        batch_mean = np.mean(clean, axis=0)
-        batch_sq_mean = np.mean(clean**2, axis=0)
-
-        dt = new_data.shape[0] / max(self.srate, 1.0)
-        alpha = 1.0 - np.exp(-dt / AUTOSCALE_TIME_CONSTANT)
-
-        if self.ew_mean is None:
-            self.ew_mean = batch_mean.copy()
-            self.ew_sq_mean = batch_sq_mean.copy()
-        else:
-            self.ew_mean += alpha * (batch_mean - self.ew_mean)
-            self.ew_sq_mean += alpha * (batch_sq_mean - self.ew_sq_mean)
-
-    def _compute_y_scale(self) -> float:
-        if self.ew_mean is None:
-            return 1.0 / max(self.n_visible, 1)
-        var = self.ew_sq_mean - self.ew_mean**2
-        var = np.maximum(var, 0.0)
-        sigma = np.sqrt(var)
-        mean_sigma = float(np.mean(sigma))
-        if mean_sigma < 1e-12:
-            return 1.0 / max(self.n_visible, 1)
-        return 1.0 / (AUTOSCALE_N_SIGMA * mean_sigma * self.n_visible)
 
     def _mark_dirty(self, first_col: int, last_col: int) -> None:
         if first_col <= last_col:
