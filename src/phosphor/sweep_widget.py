@@ -13,10 +13,13 @@ from .constants import (
     CURSOR_COLOR,
     CURSOR_GAP_COLUMNS,
     DEFAULT_DISPLAY_DUR,
+    DEFAULT_MAX_EVENTS,
     DEFAULT_N_COLUMNS,
     DEFAULT_N_VISIBLE,
+    EVENT_POOL_SIZE,
+    EVENT_THICKNESS,
 )
-from .sweep_buffer import SweepBuffer
+from .sweep_buffer import SweepBuffer, SweepEvent
 from .x_axis import XAxisWidget
 
 __all__ = ["SweepConfig", "SweepWidget"]
@@ -30,6 +33,7 @@ class SweepConfig:
     n_columns: int = DEFAULT_N_COLUMNS
     n_visible: int = DEFAULT_N_VISIBLE
     channel_labels: list[str] | None = None
+    max_events: int = DEFAULT_MAX_EVENTS
 
 
 class SweepWidget(ChannelPlotWidget):
@@ -62,6 +66,7 @@ class SweepWidget(ChannelPlotWidget):
             display_dur=config.display_dur,
             n_columns=config.n_columns,
             n_visible=min(config.n_visible, config.n_channels),
+            max_events=config.max_events,
         )
         self._buffer = self.sweep_buffer
 
@@ -70,6 +75,8 @@ class SweepWidget(ChannelPlotWidget):
         self._multi_line = None
         self._z_offset_scale = 1.0
         self._cursor_line = None
+        self._event_multi_line = None
+        self._events_visible_count = 0
         self._setup_graphics()
 
         # Start rendering
@@ -82,6 +89,10 @@ class SweepWidget(ChannelPlotWidget):
     def push_data(self, data: np.ndarray) -> None:
         """Push new samples. *data* shape: ``(n_samples, n_channels)``, float32."""
         self.sweep_buffer.push_data(data)
+
+    def push_events(self, events: list[SweepEvent]) -> None:
+        """Push discrete events for overlay rendering."""
+        self.sweep_buffer.push_events(events)
 
     def update_config(self, config: SweepConfig) -> None:
         """Update configuration at runtime (e.g. on reconnect)."""
@@ -115,6 +126,10 @@ class SweepWidget(ChannelPlotWidget):
         if self._cursor_line is not None:
             subplot.delete_graphic(self._cursor_line)
             self._cursor_line = None
+        if self._event_multi_line is not None:
+            subplot.delete_graphic(self._event_multi_line)
+            self._event_multi_line = None
+        self._events_visible_count = 0
 
         buf = self.sweep_buffer
         data = buf.get_multiline_data()
@@ -149,7 +164,16 @@ class SweepWidget(ChannelPlotWidget):
             thickness=max(1.0, gap_w * 2),
         )
 
+        self._setup_event_pool()
         self._cached_version = buf.version
+
+    def _setup_event_pool(self) -> None:
+        """Pre-allocate a single MultiLineGraphic for event ticks."""
+        data = np.zeros((EVENT_POOL_SIZE, 2, 3), dtype=np.float32)
+        self._event_multi_line = self._subplot.add_multi_line(
+            data,
+            thickness=EVENT_THICKNESS,
+        )
 
     # ------------------------------------------------------------------
     # Rendering (animation callback)
@@ -176,6 +200,59 @@ class SweepWidget(ChannelPlotWidget):
         sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
         self._cursor_line.data[0] = [sweep_x, self._cursor_y_min, 0]
         self._cursor_line.data[1] = [sweep_x, self._cursor_y_max, 0]
+
+        self._update_event_graphics()
+
+    def _update_event_graphics(self) -> None:
+        """Update the event tick MultiLineGraphic from visible events."""
+        buf = self.sweep_buffer
+        visible_events = buf.get_visible_events()
+        ml = self._event_multi_line
+
+        data = np.zeros((EVENT_POOL_SIZE, 2, 3), dtype=np.float32)
+        # Color stride: 2 data vertices + 1 NaN separator per line
+        color_stride = ml.colors.value.shape[0] // EVENT_POOL_SIZE
+        colors = np.zeros((EVENT_POOL_SIZE * color_stride, 4), dtype=np.float32)
+        n_active = 0
+
+        for ev, x_pos in visible_events:
+            if n_active >= EVENT_POOL_SIZE:
+                break
+
+            if ev.channel is None:
+                y_min = self._cursor_y_min
+                y_max = self._cursor_y_max
+            else:
+                vis_start = buf.channel_offset
+                vis_end = buf.channel_offset + buf.n_visible
+                if ev.channel < vis_start or ev.channel >= vis_end:
+                    continue
+                vis_idx = ev.channel - buf.channel_offset
+                y_center = vis_idx * self._z_offset_scale
+                y_min = y_center - 0.45 * self._z_offset_scale
+                y_max = y_center + 0.45 * self._z_offset_scale
+
+            data[n_active, 0] = [x_pos, y_min, 0]
+            data[n_active, 1] = [x_pos, y_max, 0]
+            ci = n_active * color_stride
+            colors[ci : ci + 2] = (*ev.color, 1.0)
+            n_active += 1
+
+        ml.data[:] = data
+        ml.colors[:] = colors
+        self._events_visible_count = n_active
+
+    def _apply_auto_scale(self) -> None:
+        """Set camera bounds from known data layout (avoids GPU readback)."""
+        buf = self.sweep_buffer
+        cam = self._subplot.camera
+        cam.width = buf.display_dur
+        cam.height = self._cursor_y_max - self._cursor_y_min
+        cam.world.position = (
+            buf.display_dur / 2,
+            (self._cursor_y_min + self._cursor_y_max) / 2,
+            (buf.n_visible - 1) / 2,
+        )
 
     # ------------------------------------------------------------------
     # Keyboard controls (sweep-specific keys)

@@ -81,6 +81,7 @@ class ChannelPlotWidget(QWidget):
         self._subplot.controller = None
         self._subplot.axes.visible = False
         self._subplot.title.visible = False
+        self._subplot.camera.maintain_aspect = False
 
         # Register fpl event handlers on the subplot's pygfx renderer
         renderer = self._subplot.renderer
@@ -102,6 +103,10 @@ class ChannelPlotWidget(QWidget):
         """Update MultiLine data each frame. Called from animation callback."""
         raise NotImplementedError
 
+    def _apply_auto_scale(self) -> None:
+        """Set camera to fit content. Override in subclass for fast path."""
+        self._subplot.auto_scale(maintain_aspect=False, zoom=1.0)
+
     def _on_ctrl_scroll(self, delta: float) -> None:
         """Handle Ctrl+scroll for time/freq zoom. Override in subclass."""
 
@@ -112,7 +117,7 @@ class ChannelPlotWidget(QWidget):
     def _animation_callback(self) -> None:
         self._update_graphics()
         if self._autoscale_enabled:
-            self._subplot.auto_scale(maintain_aspect=False, zoom=1.0)
+            self._apply_auto_scale()
 
     # ------------------------------------------------------------------
     # Event handlers (fpl native events)
@@ -147,7 +152,7 @@ class ChannelPlotWidget(QWidget):
         elif key in ("a", "A"):
             self._autoscale_enabled = not self._autoscale_enabled
             if self._autoscale_enabled:
-                self._subplot.auto_scale(maintain_aspect=False, zoom=1.0)
+                self._apply_auto_scale()
 
         self._update_range_label()
 

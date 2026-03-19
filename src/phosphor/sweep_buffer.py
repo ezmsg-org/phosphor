@@ -2,8 +2,20 @@
 
 import threading
 import warnings
+from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
+
+from .constants import DEFAULT_MAX_EVENTS
+
+
+@dataclass
+class SweepEvent:
+    t_elapsed: float  # absolute elapsed seconds (same clock as data)
+    channel: int | None = None  # None = full-height; int = specific channel (0-based)
+    label: str = ""
+    color: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 class SweepBuffer:
@@ -14,6 +26,7 @@ class SweepBuffer:
         display_dur: float,
         n_columns: int,
         n_visible: int,
+        max_events: int = DEFAULT_MAX_EVENTS,
     ):
         self.n_channels = n_channels
         self.srate = srate
@@ -26,6 +39,14 @@ class SweepBuffer:
         self._lock = threading.Lock()
         self._version = 0
 
+        # Time tracking
+        self._t_zero: float = 0.0
+        self._samples_since_t_zero: int = 0
+
+        # Event storage
+        self._events: deque[SweepEvent] = deque(maxlen=max_events)
+        self._events_dirty: bool = False
+
         self._allocate()
 
     # ------------------------------------------------------------------
@@ -34,6 +55,10 @@ class SweepBuffer:
 
     def _allocate(self):
         """Allocate / reallocate all internal buffers."""
+        # Record elapsed time at this allocate so event x-positions can be
+        # computed relative to write_pos (which resets to 0 here).
+        self._alloc_elapsed = self._t_zero + self._samples_since_t_zero / self.srate
+        self._samples_since_alloc = 0
         self.total_raw_samples = max(int(round(self.srate * self.display_dur)), 1)
         self.n_columns = min(self._configured_n_columns, self.total_raw_samples)
         self.samples_per_column = self.total_raw_samples / self.n_columns
@@ -47,6 +72,7 @@ class SweepBuffer:
 
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
+        self._events_dirty = True
 
         self._version += 1
 
@@ -110,12 +136,17 @@ class SweepBuffer:
             # Update sweep cursor
             self.sweep_col = self._col_for_pos(self.write_pos)
 
+            # Track elapsed time and write position
+            self._samples_since_t_zero += n_samples
+            self._samples_since_alloc += n_samples
+
             # Mark dirty
             self._mark_dirty(first_col, last_col)
 
     def set_n_channels(self, n: int) -> None:
         with self._lock:
             if n != self.n_channels:
+                self._reset_time_epoch()
                 self.n_channels = n
                 self.n_visible = min(self.n_visible, self.n_channels)
                 self.channel_offset = min(self.channel_offset, max(0, self.n_channels - self.n_visible))
@@ -140,12 +171,12 @@ class SweepBuffer:
         with self._lock:
             dur = max(0.1, dur)
             if dur != self.display_dur:
-                self.display_dur = dur
-                self._allocate()
+                self._resize_display_dur(dur)
 
     def set_srate(self, srate: float) -> None:
         with self._lock:
             if srate != self.srate:
+                self._reset_time_epoch()
                 self.srate = srate
                 self._allocate()
 
@@ -294,3 +325,112 @@ class SweepBuffer:
             else:
                 self._dirty_start = 0
                 self._dirty_end = self.n_columns - 1
+
+    def _resize_display_dur(self, new_dur: float) -> None:
+        """Resize buffer for new display duration, preserving data and write position.
+
+        Instead of resetting ``write_pos`` to 0, the sweep cursor stays at the
+        same time-offset and existing samples are remapped by age into the new
+        buffer.  Must be called while holding ``_lock``.
+        """
+        old_total = self.total_raw_samples
+        old_write_pos = self.write_pos
+        old_raw = self.raw_buffer
+
+        self.display_dur = new_dur
+        new_total = max(int(round(self.srate * new_dur)), 1)
+        new_n_columns = min(self._configured_n_columns, new_total)
+
+        if new_total == old_total:
+            # Raw buffer unchanged; just update x-axis metadata
+            self.n_columns = new_n_columns
+            self.samples_per_column = new_total / new_n_columns
+            self.sweep_col = self._col_for_pos(self.write_pos)
+            self._events_dirty = True
+            self._version += 1
+            return
+
+        # New write position: same total-sample count, different modulus
+        new_write_pos = self._samples_since_alloc % new_total
+
+        # Create new (zeroed) buffer
+        new_raw = np.zeros((new_total, self.n_visible), dtype=np.float32)
+
+        # Copy data preserving sample ages
+        available = min(self._samples_since_alloc, old_total)
+        keep = min(available, new_total)
+
+        if keep > 0:
+            # Extract `keep` most recent samples from old buffer (oldest first)
+            old_start = (old_write_pos - keep) % old_total
+            if old_start + keep <= old_total:
+                old_data = old_raw[old_start : old_start + keep]
+            else:
+                first = old_total - old_start
+                old_data = np.concatenate([old_raw[old_start:], old_raw[: keep - first]])
+
+            # Insert into new buffer ending at new_write_pos - 1
+            new_start = (new_write_pos - keep) % new_total
+            if new_start + keep <= new_total:
+                new_raw[new_start : new_start + keep] = old_data
+            else:
+                first = new_total - new_start
+                new_raw[new_start:] = old_data[:first]
+                new_raw[: keep - first] = old_data[first:]
+
+        # Update state
+        self.total_raw_samples = new_total
+        self.n_columns = new_n_columns
+        self.samples_per_column = new_total / new_n_columns
+        self.raw_buffer = new_raw
+        self.write_pos = new_write_pos
+        self.sweep_col = self._col_for_pos(new_write_pos)
+
+        # Recompute display columns from new raw data
+        self.display_mins = np.zeros((new_n_columns, self.n_visible), dtype=np.float32)
+        self.display_maxs = np.zeros((new_n_columns, self.n_visible), dtype=np.float32)
+        self._recompute_columns(0, new_n_columns)
+
+        self._dirty_start = None
+        self._dirty_end = None
+        self._events_dirty = True
+        self._version += 1
+
+    def _reset_time_epoch(self) -> None:
+        """Advance _t_zero by elapsed samples, reset counter. Must hold _lock."""
+        self._t_zero += self._samples_since_t_zero / self.srate
+        self._samples_since_t_zero = 0
+
+    # ------------------------------------------------------------------
+    # Time and events
+    # ------------------------------------------------------------------
+
+    @property
+    def elapsed_time(self) -> float:
+        """Current elapsed time in seconds (thread-safe)."""
+        with self._lock:
+            return self._t_zero + self._samples_since_t_zero / self.srate
+
+    def push_events(self, events: list[SweepEvent]) -> None:
+        """Add events to the store. Thread-safe."""
+        with self._lock:
+            self._events.extend(events)
+            self._events_dirty = True
+
+    def get_visible_events(self) -> list[tuple[SweepEvent, float]]:
+        """Return visible events with their x-positions. Thread-safe.
+
+        Returns list of ``(event, x_position)`` for events within the current
+        display window.
+        """
+        with self._lock:
+            elapsed = self._t_zero + self._samples_since_t_zero / self.srate
+            dur = self.display_dur
+            result = []
+            for ev in self._events:
+                age = elapsed - ev.t_elapsed
+                if 0 <= age < dur:
+                    x_pos = (ev.t_elapsed - self._alloc_elapsed) % dur
+                    result.append((ev, x_pos))
+            self._events_dirty = False
+            return result

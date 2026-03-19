@@ -1,6 +1,7 @@
 """Demo: synthetic multi-frequency sine waves fed into SweepWidget or SpectrumWidget."""
 
 import argparse
+import random
 import sys
 
 import numpy as np
@@ -13,6 +14,7 @@ from phosphor import (
     SpectrumConfig,
     SpectrumWidget,
     SweepConfig,
+    SweepEvent,
     SweepWidget,
 )
 
@@ -90,13 +92,29 @@ def main():
         )
         widget = SweepWidget(config)
         widget.setWindowTitle("Phosphor Demo")
+        push_counter = 0
 
         def push_chunk():
-            nonlocal sample_counter
+            nonlocal sample_counter, push_counter
             t = (sample_counter + np.arange(chunk_size)) / args.srate
             data = (np.sin(2.0 * np.pi * frequencies[None, :] * t[:, None]) * amplitudes[None, :]).astype(np.float32)
             widget.push_data(data)
             sample_counter += chunk_size
+            push_counter += 1
+
+            # Inject a random event with jitter (~every 0.3–0.7s)
+            if push_counter % 30 == 0 and random.random() < 0.7:
+                t_now = widget.sweep_buffer.elapsed_time
+                jitter = random.uniform(-0.1, 0.1)
+                t_event = max(0.0, t_now + jitter)
+                if random.random() < 0.5:
+                    # Full-height event
+                    ev = SweepEvent(t_elapsed=t_event, color=(1.0, 1.0, 0.4))
+                else:
+                    # Per-channel event
+                    ch = random.randint(0, args.channels - 1)
+                    ev = SweepEvent(t_elapsed=t_event, channel=ch, color=(0.4, 1.0, 1.0))
+                widget.push_events([ev])
 
     widget.resize(1200, 800)
     widget.show()

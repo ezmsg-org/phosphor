@@ -9,6 +9,11 @@ CURSOR_GAP_COLUMNS = 5
 BG_COLOR = (0.10, 0.10, 0.12, 1.0)
 CURSOR_COLOR = (0.25, 0.25, 0.28, 0.85)
 
+DEFAULT_MAX_EVENTS = 500  # max stored events (deque capacity)
+EVENT_POOL_SIZE = 64  # max simultaneously rendered event ticks
+EVENT_COLOR = (1.0, 1.0, 1.0, 1.0)  # default white
+EVENT_THICKNESS = 2.0
+
 # 10-color repeating palette (RGBA, bright on dark background)
 CHANNEL_COLORS = [
     (1.0, 0.40, 0.40, 1.0),  # red
