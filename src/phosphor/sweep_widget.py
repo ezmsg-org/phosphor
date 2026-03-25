@@ -86,9 +86,13 @@ class SweepWidget(ChannelPlotWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def push_data(self, data: np.ndarray) -> None:
-        """Push new samples. *data* shape: ``(n_samples, n_channels)``, float32."""
-        self.sweep_buffer.push_data(data)
+    def push_data(self, data: np.ndarray, timestamps=None) -> None:
+        """Push new samples. *data* shape: ``(n_samples, n_channels)``, float32.
+
+        *timestamps* — ``None``, a scalar (time of first sample), or an
+        iterable of length *n_samples* (per-sample times).
+        """
+        self.sweep_buffer.push_data(data, timestamps)
 
     def push_events(self, events: list[SweepEvent]) -> None:
         """Push discrete events for overlay rendering."""

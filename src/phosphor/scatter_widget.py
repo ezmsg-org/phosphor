@@ -99,7 +99,7 @@ class ScatterWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def push_data(self, data: np.ndarray) -> None:
+    def push_data(self, data: np.ndarray, timestamps=None) -> None:
         """Push scalar values. Shape ``(n_channels,)`` or ``(n_samples, n_channels)``."""
         self._buffer.push_data(data)
 

@@ -73,7 +73,7 @@ class SpectrumWidget(ChannelPlotWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def push_data(self, magnitudes: np.ndarray) -> None:
+    def push_data(self, magnitudes: np.ndarray, timestamps=None) -> None:
         """Push pre-computed magnitudes.  Shape ``(n_bins, n_channels)``, float32."""
         if self._log_x:
             magnitudes = self._resample_to_log(magnitudes)

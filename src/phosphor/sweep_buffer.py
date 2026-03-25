@@ -39,9 +39,9 @@ class SweepBuffer:
         self._lock = threading.Lock()
         self._version = 0
 
-        # Time tracking
-        self._t_zero: float = 0.0
-        self._samples_since_t_zero: int = 0
+        # Time tracking — _elapsed holds the current time in whatever basis
+        # the caller uses (sample-counting by default, or external timestamps).
+        self._elapsed: float = 0.0
 
         # Event storage
         self._events: deque[SweepEvent] = deque(maxlen=max_events)
@@ -55,9 +55,6 @@ class SweepBuffer:
 
     def _allocate(self):
         """Allocate / reallocate all internal buffers."""
-        # Record elapsed time at this allocate so event x-positions can be
-        # computed relative to write_pos (which resets to 0 here).
-        self._alloc_elapsed = self._t_zero + self._samples_since_t_zero / self.srate
         self._samples_since_alloc = 0
         self.total_raw_samples = max(int(round(self.srate * self.display_dur)), 1)
         self.n_columns = min(self._configured_n_columns, self.total_raw_samples)
@@ -80,8 +77,17 @@ class SweepBuffer:
     # Public mutators (called from data-source thread or UI thread)
     # ------------------------------------------------------------------
 
-    def push_data(self, data: np.ndarray) -> None:
-        """Push new samples. data shape: (n_samples, n_channels). Thread-safe."""
+    def push_data(self, data: np.ndarray, timestamps=None) -> None:
+        """Push new samples. data shape: (n_samples, n_channels). Thread-safe.
+
+        *timestamps* sets the time basis for event alignment:
+
+        - ``None`` — elapsed time increments by ``n_samples / srate``.
+        - scalar — time of the first sample; elapsed becomes
+          ``scalar + n_samples / srate``.
+        - iterable of length *n_samples* — per-sample times; elapsed
+          becomes the last entry.
+        """
         if data.size == 0:
             return
 
@@ -137,8 +143,17 @@ class SweepBuffer:
             self.sweep_col = self._col_for_pos(self.write_pos)
 
             # Track elapsed time and write position
-            self._samples_since_t_zero += n_samples
             self._samples_since_alloc += n_samples
+            if timestamps is None:
+                self._elapsed += n_samples / self.srate
+            elif np.ndim(timestamps) == 0:
+                # Scalar: time of first sample in chunk.
+                self._elapsed = float(timestamps) + n_samples / self.srate
+            else:
+                # Per-sample array: last entry + one sample period so
+                # _elapsed is the exclusive end, consistent with the
+                # scalar and sample-counting cases.
+                self._elapsed = float(timestamps[-1]) + 1.0 / self.srate
 
             # Mark dirty
             self._mark_dirty(first_col, last_col)
@@ -146,7 +161,6 @@ class SweepBuffer:
     def set_n_channels(self, n: int) -> None:
         with self._lock:
             if n != self.n_channels:
-                self._reset_time_epoch()
                 self.n_channels = n
                 self.n_visible = min(self.n_visible, self.n_channels)
                 self.channel_offset = min(self.channel_offset, max(0, self.n_channels - self.n_visible))
@@ -176,7 +190,6 @@ class SweepBuffer:
     def set_srate(self, srate: float) -> None:
         with self._lock:
             if srate != self.srate:
-                self._reset_time_epoch()
                 self.srate = srate
                 self._allocate()
 
@@ -396,11 +409,6 @@ class SweepBuffer:
         self._events_dirty = True
         self._version += 1
 
-    def _reset_time_epoch(self) -> None:
-        """Advance _t_zero by elapsed samples, reset counter. Must hold _lock."""
-        self._t_zero += self._samples_since_t_zero / self.srate
-        self._samples_since_t_zero = 0
-
     # ------------------------------------------------------------------
     # Time and events
     # ------------------------------------------------------------------
@@ -409,7 +417,7 @@ class SweepBuffer:
     def elapsed_time(self) -> float:
         """Current elapsed time in seconds (thread-safe)."""
         with self._lock:
-            return self._t_zero + self._samples_since_t_zero / self.srate
+            return self._elapsed
 
     def push_events(self, events: list[SweepEvent]) -> None:
         """Add events to the store. Thread-safe."""
@@ -421,16 +429,24 @@ class SweepBuffer:
         """Return visible events with their x-positions. Thread-safe.
 
         Returns list of ``(event, x_position)`` for events within the current
-        display window.
+        display window.  The x-position is derived from the sample-based cursor
+        position so it stays aligned with the sweep data regardless of the
+        timestamp basis.
         """
         with self._lock:
-            elapsed = self._t_zero + self._samples_since_t_zero / self.srate
+            elapsed = self._elapsed
             dur = self.display_dur
+            # cursor_time tracks the sweep cursor in seconds (sample-based),
+            # independent of the external timestamp basis.
+            cursor_time = self._samples_since_alloc / self.srate
             result = []
-            for ev in self._events:
+            # Iterate newest-first so the render pool (which has a fixed
+            # capacity) keeps the most recent events when there are more
+            # visible events than pool slots.
+            for ev in reversed(self._events):
                 age = elapsed - ev.t_elapsed
                 if 0 <= age < dur:
-                    x_pos = (ev.t_elapsed - self._alloc_elapsed) % dur
+                    x_pos = (cursor_time - age) % dur
                     result.append((ev, x_pos))
             self._events_dirty = False
             return result
