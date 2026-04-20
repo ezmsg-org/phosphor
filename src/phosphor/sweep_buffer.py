@@ -27,6 +27,7 @@ class SweepBuffer:
         n_columns: int,
         n_visible: int,
         max_events: int = DEFAULT_MAX_EVENTS,
+        channel_order: str = "top_down",
     ):
         self.n_channels = n_channels
         self.srate = srate
@@ -35,6 +36,9 @@ class SweepBuffer:
         self.n_columns = n_columns
         self.n_visible = min(n_visible, n_channels)
         self.channel_offset = 0
+        # ``top_down``: channel index 0 at the top of the plot, growing downward.
+        # ``bottom_up``: channel 0 at the bottom (legacy / scientific default).
+        self.channel_order = channel_order
 
         self._lock = threading.Lock()
         self._version = 0
@@ -224,7 +228,24 @@ class SweepBuffer:
         out[:, 0::2, 1] = mins.T * scale
         out[:, 1::2, 1] = maxs.T * scale
         out[:, :, 2] = np.arange(self.n_visible)[:, np.newaxis]
+        if self.channel_order == "top_down":
+            # Channel 0 at the highest Z (drawn at the top of the canvas);
+            # subsequent channels grow downward.
+            z_indices = (self.n_visible - 1) - np.arange(self.n_visible)
+        else:
+            z_indices = np.arange(self.n_visible)
+        out[:, :, 2] = z_indices[:, np.newaxis]
         return out
+
+    def set_channel_order(self, order: str) -> None:
+        if order not in ("top_down", "bottom_up"):
+            raise ValueError(f"channel_order must be 'top_down' or 'bottom_up', got {order!r}")
+        with self._lock:
+            if order == self.channel_order:
+                return
+            self.channel_order = order
+            self._dirty_start = 0
+            self._dirty_end = self.n_columns - 1
 
     def get_multiline_data(self) -> np.ndarray:
         """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib MultiLineGraphic.

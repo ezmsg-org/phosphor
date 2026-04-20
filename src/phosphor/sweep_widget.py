@@ -34,6 +34,9 @@ class SweepConfig:
     n_visible: int = DEFAULT_N_VISIBLE
     channel_labels: list[str] | None = None
     max_events: int = DEFAULT_MAX_EVENTS
+    # ``top_down`` (default) puts channel index 0 at the top of the canvas
+    # — what most scientific viewers do. ``bottom_up`` puts it at the bottom.
+    channel_order: str = "top_down"
 
 
 class SweepWidget(ChannelPlotWidget):
@@ -67,6 +70,7 @@ class SweepWidget(ChannelPlotWidget):
             n_columns=config.n_columns,
             n_visible=min(config.n_visible, config.n_channels),
             max_events=config.max_events,
+            channel_order=config.channel_order,
         )
         self._buffer = self.sweep_buffer
 
