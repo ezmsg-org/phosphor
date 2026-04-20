@@ -86,6 +86,7 @@ class ChannelPlotWidget(QWidget):
         # Register fpl event handlers on the subplot's pygfx renderer
         renderer = self._subplot.renderer
         renderer.add_event_handler(self._on_key_down_event, "key_down")
+        self._mouse_enabled = True
         renderer.add_event_handler(self._on_wheel_event, "wheel")
         renderer.add_event_handler(self._on_pointer_move_event, "pointer_move")
 
@@ -175,6 +176,22 @@ class ChannelPlotWidget(QWidget):
 
     def _on_pointer_move_event(self, event) -> None:
         self._handle_mouse_move(event)
+
+    def set_mouse_enabled(self, enabled: bool) -> None:
+        """Enable or disable mouse-driven plot interactions (wheel, hover tooltip).
+
+        Keyboard shortcuts and external controls (ChannelPlotControlsWidget)
+        keep working either way.
+        """
+        if enabled == self._mouse_enabled:
+            return
+        self._mouse_enabled = enabled
+        if enabled:
+            self._renderer.add_event_handler(self._on_wheel_event, "wheel")
+            self._renderer.add_event_handler(self._on_pointer_move_event, "pointer_move")
+        else:
+            self._renderer.remove_event_handler(self._on_wheel_event, "wheel")
+            self._renderer.remove_event_handler(self._on_pointer_move_event, "pointer_move")
 
     # ------------------------------------------------------------------
     # Amplitude zoom helper
