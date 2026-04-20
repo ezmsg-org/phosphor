@@ -85,6 +85,7 @@ class ChannelPlotWidget(QWidget):
 
         # Register fpl event handlers on the subplot's pygfx renderer
         renderer = self._subplot.renderer
+        self._renderer = renderer
         renderer.add_event_handler(self._on_key_down_event, "key_down")
         self._mouse_enabled = True
         renderer.add_event_handler(self._on_wheel_event, "wheel")
