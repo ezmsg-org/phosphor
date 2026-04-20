@@ -85,7 +85,9 @@ class ChannelPlotWidget(QWidget):
 
         # Register fpl event handlers on the subplot's pygfx renderer
         renderer = self._subplot.renderer
+        self._renderer = renderer
         renderer.add_event_handler(self._on_key_down_event, "key_down")
+        self._mouse_enabled = True
         renderer.add_event_handler(self._on_wheel_event, "wheel")
         renderer.add_event_handler(self._on_pointer_move_event, "pointer_move")
 
@@ -176,12 +178,37 @@ class ChannelPlotWidget(QWidget):
     def _on_pointer_move_event(self, event) -> None:
         self._handle_mouse_move(event)
 
+    def set_mouse_enabled(self, enabled: bool) -> None:
+        """Enable or disable mouse-driven plot interactions (wheel, hover tooltip).
+
+        Keyboard shortcuts and external controls (ChannelPlotControlsWidget)
+        keep working either way.
+        """
+        if enabled == self._mouse_enabled:
+            return
+        self._mouse_enabled = enabled
+        if enabled:
+            self._renderer.add_event_handler(self._on_wheel_event, "wheel")
+            self._renderer.add_event_handler(self._on_pointer_move_event, "pointer_move")
+        else:
+            self._renderer.remove_event_handler(self._on_wheel_event, "wheel")
+            self._renderer.remove_event_handler(self._on_pointer_move_event, "pointer_move")
+
     # ------------------------------------------------------------------
     # Amplitude zoom helper
     # ------------------------------------------------------------------
 
     def _zoom_amplitude(self, factor: float) -> None:
-        """Adjust camera y-scale and disable autoscale."""
+        """Scale the waveform amplitude per row, leaving channel spacing fixed.
+
+        Sweep buffers expose ``set_amplitude_scale`` for this purpose. Other
+        buffer types fall back to the legacy camera scaling (which also
+        rescales row offsets, an undesirable side effect).
+        """
+        buf = self._buffer
+        if hasattr(buf, "set_amplitude_scale"):
+            buf.set_amplitude_scale(buf.amplitude_scale * factor)
+            return
         camera = self._subplot.camera
         camera.world.scale_y *= factor
         self._autoscale_enabled = False

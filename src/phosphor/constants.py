@@ -14,7 +14,7 @@ EVENT_POOL_SIZE = 64  # max simultaneously rendered event ticks
 EVENT_COLOR = (1.0, 1.0, 1.0, 1.0)  # default white
 EVENT_THICKNESS = 2.0
 
-# 10-color repeating palette (RGBA, bright on dark background)
+# 10-color repeating palette (RGBA, bright on dark background).
 CHANNEL_COLORS = [
     (1.0, 0.40, 0.40, 1.0),  # red
     (0.40, 1.0, 0.40, 1.0),  # green
@@ -27,3 +27,20 @@ CHANNEL_COLORS = [
     (1.0, 0.60, 0.80, 1.0),  # pink
     (0.60, 1.0, 0.40, 1.0),  # lime
 ]
+
+# Lower-saturation alternative palette: less eye fatigue when many channels
+# are visible at once. Used as the default for new SweepWidget instances.
+SOFT_CHANNEL_COLORS = [
+    (0.85, 0.55, 0.55, 1.0),  # muted red
+    (0.55, 0.80, 0.60, 1.0),  # muted green
+    (0.55, 0.70, 0.90, 1.0),  # muted blue
+    (0.85, 0.80, 0.50, 1.0),  # muted yellow
+    (0.55, 0.85, 0.85, 1.0),  # muted cyan
+    (0.80, 0.60, 0.85, 1.0),  # muted magenta
+    (0.85, 0.70, 0.50, 1.0),  # muted orange
+    (0.78, 0.78, 0.78, 1.0),  # light grey
+    (0.85, 0.65, 0.75, 1.0),  # muted pink
+    (0.65, 0.80, 0.55, 1.0),  # muted lime
+]
+
+DEFAULT_LINE_THICKNESS = 0.8

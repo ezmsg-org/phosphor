@@ -27,6 +27,8 @@ class SweepBuffer:
         n_columns: int,
         n_visible: int,
         max_events: int = DEFAULT_MAX_EVENTS,
+        channel_order: str = "top_down",
+        amplitude_scale: float = 1.0,
     ):
         self.n_channels = n_channels
         self.srate = srate
@@ -35,6 +37,13 @@ class SweepBuffer:
         self.n_columns = n_columns
         self.n_visible = min(n_visible, n_channels)
         self.channel_offset = 0
+        # ``top_down``: channel index 0 at the top of the plot, growing downward.
+        # ``bottom_up``: channel 0 at the bottom (legacy / scientific default).
+        self.channel_order = channel_order
+        # Multiplier applied to displayed sample values *after* the data-driven
+        # autoscale. >1 makes waves taller (may clip into adjacent rows);
+        # <1 makes them flatter. Channel row positions are not affected.
+        self._amplitude_scale = float(amplitude_scale)
 
         self._lock = threading.Lock()
         self._version = 0
@@ -70,6 +79,8 @@ class SweepBuffer:
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
         self._events_dirty = True
+        # Per-channel midpoint cache (refreshed on every full rebuild).
+        self._ch_mid = np.zeros((self.n_visible, 1), dtype=np.float32)
 
         self._version += 1
 
@@ -211,6 +222,18 @@ class SweepBuffer:
         max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
         return 0.5 / max(max_abs, 1e-12)
 
+    def _compute_ch_mid(self, scale: float) -> np.ndarray:
+        """Per-channel midpoint (post-scale) of the visible window's range.
+
+        Subtracted before amplitude scaling so a channel zooms around its
+        own visual center instead of around y=0 — keeps DC bias from
+        translating channels as the user changes ``amplitude_scale``.
+        Must be called while holding ``_lock``.
+        """
+        ch_min = self.display_mins.min(axis=0)
+        ch_max = self.display_maxs.max(axis=0)
+        return (((ch_min + ch_max) / 2) * scale).astype(np.float32).reshape(-1, 1)
+
     def _build_multiline_array(self, mins, maxs, col_indices, scale) -> np.ndarray:
         """Build a ``[n_visible, 2*n_cols, 3]`` array from min/max slices.
 
@@ -221,10 +244,51 @@ class SweepBuffer:
         col_x = col_indices.astype(np.float32) / max(self.n_columns - 1, 1) * self.display_dur
         out[:, 0::2, 0] = col_x[np.newaxis, :]
         out[:, 1::2, 0] = col_x[np.newaxis, :]
-        out[:, 0::2, 1] = mins.T * scale
-        out[:, 1::2, 1] = maxs.T * scale
-        out[:, :, 2] = np.arange(self.n_visible)[:, np.newaxis]
+        # ``amplitude_scale`` lets the user scale the waveform alone — the
+        # channel row positions (Z below) are unaffected, so big-amplitude
+        # signals just clip into adjacent rows rather than rescaling the
+        # whole canvas. We zoom around each channel's own midpoint so that
+        # DC bias does not translate the line down/up as ``amp`` grows.
+        amp = self._amplitude_scale
+        ch_mid = self._ch_mid  # (n_visible, 1), already in post-_y_scale units
+        out[:, 0::2, 1] = (mins.T * scale - ch_mid) * amp + ch_mid
+        out[:, 1::2, 1] = (maxs.T * scale - ch_mid) * amp + ch_mid
+        if self.channel_order == "top_down":
+            # Channel 0 at the highest Z (drawn at the top of the canvas);
+            # subsequent channels grow downward.
+            z_indices = (self.n_visible - 1) - np.arange(self.n_visible)
+        else:
+            z_indices = np.arange(self.n_visible)
+        out[:, :, 2] = z_indices[:, np.newaxis]
         return out
+
+    # ------------------------------------------------------------------
+    # Display-state setters (thread-safe, mark dirty)
+    # ------------------------------------------------------------------
+
+    @property
+    def amplitude_scale(self) -> float:
+        return self._amplitude_scale
+
+    def set_amplitude_scale(self, scale: float) -> None:
+        scale = max(float(scale), 1e-6)
+        with self._lock:
+            if scale == self._amplitude_scale:
+                return
+            self._amplitude_scale = scale
+            # Force a full rebuild on the next animation frame.
+            self._dirty_start = 0
+            self._dirty_end = self.n_columns - 1
+
+    def set_channel_order(self, order: str) -> None:
+        if order not in ("top_down", "bottom_up"):
+            raise ValueError(f"channel_order must be 'top_down' or 'bottom_up', got {order!r}")
+        with self._lock:
+            if order == self.channel_order:
+                return
+            self.channel_order = order
+            self._dirty_start = 0
+            self._dirty_end = self.n_columns - 1
 
     def get_multiline_data(self) -> np.ndarray:
         """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib MultiLineGraphic.
@@ -234,6 +298,7 @@ class SweepBuffer:
         """
         with self._lock:
             self._y_scale = self._compute_y_scale()
+            self._ch_mid = self._compute_ch_mid(self._y_scale)
             out = self._build_multiline_array(
                 self.display_mins,
                 self.display_maxs,
@@ -260,6 +325,7 @@ class SweepBuffer:
             if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
                 # Full update with new scale
                 self._y_scale = new_scale
+                self._ch_mid = self._compute_ch_mid(self._y_scale)
                 out = self._build_multiline_array(
                     self.display_mins,
                     self.display_maxs,
@@ -287,6 +353,7 @@ class SweepBuffer:
             else:
                 # Wrapped — full update
                 self._y_scale = new_scale
+                self._ch_mid = self._compute_ch_mid(self._y_scale)
                 out = self._build_multiline_array(
                     self.display_mins,
                     self.display_maxs,

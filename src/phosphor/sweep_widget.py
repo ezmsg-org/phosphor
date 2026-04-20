@@ -9,15 +9,16 @@ from PySide6.QtWidgets import QWidget
 
 from .channel_plot import ChannelPlotWidget
 from .constants import (
-    CHANNEL_COLORS,
     CURSOR_COLOR,
     CURSOR_GAP_COLUMNS,
     DEFAULT_DISPLAY_DUR,
+    DEFAULT_LINE_THICKNESS,
     DEFAULT_MAX_EVENTS,
     DEFAULT_N_COLUMNS,
     DEFAULT_N_VISIBLE,
     EVENT_POOL_SIZE,
     EVENT_THICKNESS,
+    SOFT_CHANNEL_COLORS,
 )
 from .sweep_buffer import SweepBuffer, SweepEvent
 from .x_axis import XAxisWidget
@@ -34,6 +35,17 @@ class SweepConfig:
     n_visible: int = DEFAULT_N_VISIBLE
     channel_labels: list[str] | None = None
     max_events: int = DEFAULT_MAX_EVENTS
+    # ``top_down`` (default) puts channel index 0 at the top of the canvas
+    # — what most scientific viewers do. ``bottom_up`` puts it at the bottom.
+    channel_order: str = "top_down"
+    # Per-channel waveform line thickness in fastplotlib units.
+    line_thickness: float = DEFAULT_LINE_THICKNESS
+    # Repeating per-channel color palette. ``None`` uses the soft default
+    # (less eye fatigue with many channels). Pass ``CHANNEL_COLORS`` from
+    # ``phosphor.constants`` for the legacy bright palette.
+    colors: list[tuple[float, float, float, float]] | None = None
+    # Initial waveform-amplitude multiplier (1.0 = data autoscale only).
+    amplitude_scale: float = 1.0
 
 
 class SweepWidget(ChannelPlotWidget):
@@ -67,8 +79,12 @@ class SweepWidget(ChannelPlotWidget):
             n_columns=config.n_columns,
             n_visible=min(config.n_visible, config.n_channels),
             max_events=config.max_events,
+            channel_order=config.channel_order,
+            amplitude_scale=config.amplitude_scale,
         )
         self._buffer = self.sweep_buffer
+        self._palette = list(config.colors) if config.colors is not None else list(SOFT_CHANNEL_COLORS)
+        self._line_thickness = config.line_thickness
 
         # Create initial graphics
         self._cached_version = -1
@@ -138,15 +154,15 @@ class SweepWidget(ChannelPlotWidget):
         buf = self.sweep_buffer
         data = buf.get_multiline_data()
 
-        # Build per-channel colors (cycling through CHANNEL_COLORS)
+        # Build per-channel colors (cycling through configured palette)
         n_vis = buf.n_visible
-        colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
+        colors = [self._palette[i % len(self._palette)][:3] for i in range(n_vis)]
 
         self._multi_line = subplot.add_multi_line(
             data,
             colors=colors,
             z_offset_scale=self._z_offset_scale,
-            thickness=1.5,
+            thickness=self._line_thickness,
         )
 
         # Cursor: vertical line at the sweep position.
