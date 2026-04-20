@@ -44,6 +44,8 @@ class SweepConfig:
     # (less eye fatigue with many channels). Pass ``CHANNEL_COLORS`` from
     # ``phosphor.constants`` for the legacy bright palette.
     colors: list[tuple[float, float, float, float]] | None = None
+    # Initial waveform-amplitude multiplier (1.0 = data autoscale only).
+    amplitude_scale: float = 1.0
 
 
 class SweepWidget(ChannelPlotWidget):
@@ -78,6 +80,7 @@ class SweepWidget(ChannelPlotWidget):
             n_visible=min(config.n_visible, config.n_channels),
             max_events=config.max_events,
             channel_order=config.channel_order,
+            amplitude_scale=config.amplitude_scale,
         )
         self._buffer = self.sweep_buffer
         self._palette = list(config.colors) if config.colors is not None else list(SOFT_CHANNEL_COLORS)

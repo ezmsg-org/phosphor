@@ -181,7 +181,16 @@ class ChannelPlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _zoom_amplitude(self, factor: float) -> None:
-        """Adjust camera y-scale and disable autoscale."""
+        """Scale the waveform amplitude per row, leaving channel spacing fixed.
+
+        Sweep buffers expose ``set_amplitude_scale`` for this purpose. Other
+        buffer types fall back to the legacy camera scaling (which also
+        rescales row offsets, an undesirable side effect).
+        """
+        buf = self._buffer
+        if hasattr(buf, "set_amplitude_scale"):
+            buf.set_amplitude_scale(buf.amplitude_scale * factor)
+            return
         camera = self._subplot.camera
         camera.world.scale_y *= factor
         self._autoscale_enabled = False
