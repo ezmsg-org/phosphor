@@ -8,6 +8,7 @@ they can be pinned here without a canvas.
 """
 
 import numpy as np
+import pytest
 
 from phosphor.channel_plot import ChannelPlotWidget
 from phosphor.sweep_widget import SweepWidget
@@ -134,3 +135,55 @@ def test_colour_rewrite_survives_a_single_visible_channel():
     w = make_widget(n_visible=1, offset=7, stride=5)
     w._apply_channel_colors()
     assert np.all(w._multi_line.colors.value[:, :3] == (0.0, 1.0, 0.0))
+
+
+# ---- rows map back to the right channel ------------------------------------
+
+
+class OrderedBuffer:
+    def __init__(self, channel_offset, n_visible, channel_order=None):
+        self.channel_offset, self.n_visible = channel_offset, n_visible
+        if channel_order is not None:
+            self.channel_order = channel_order
+
+
+def make_plot(buffer) -> ChannelPlotWidget:
+    plot = ChannelPlotWidget.__new__(ChannelPlotWidget)
+    plot._buffer = buffer
+    return plot
+
+
+def test_top_down_puts_the_first_visible_channel_at_the_top():
+    """The sweep's default. Row 0 is the bottom of the canvas, so the first
+    channel is the *last* row -- reading it off as offset + row inverts the
+    hover tooltip and drops event ticks on the wrong trace."""
+    plot = make_plot(OrderedBuffer(channel_offset=10, n_visible=4, channel_order="top_down"))
+
+    assert plot._channel_at_row(0) == 13, "bottom row holds the last channel"
+    assert plot._channel_at_row(3) == 10, "top row holds the first"
+    assert plot._row_of_channel(10) == 3
+    assert plot._row_of_channel(13) == 0
+
+
+def test_bottom_up_counts_rows_with_the_channels():
+    plot = make_plot(OrderedBuffer(channel_offset=10, n_visible=4, channel_order="bottom_up"))
+
+    assert plot._channel_at_row(0) == 10
+    assert plot._channel_at_row(3) == 13
+    assert plot._row_of_channel(10) == 0
+
+
+def test_a_buffer_with_no_declared_order_is_bottom_up():
+    """The spectrum offsets its rows with a plain arange and never sets
+    channel_order, so absent must not be read as the sweep's default."""
+    plot = make_plot(OrderedBuffer(channel_offset=10, n_visible=4))
+
+    assert not plot._is_top_down()
+    assert plot._channel_at_row(0) == 10
+
+
+@pytest.mark.parametrize("order", ["top_down", "bottom_up"])
+def test_row_and_channel_mappings_are_inverses(order):
+    plot = make_plot(OrderedBuffer(channel_offset=7, n_visible=5, channel_order=order))
+    for row in range(5):
+        assert plot._row_of_channel(plot._channel_at_row(row)) == row

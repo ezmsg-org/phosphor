@@ -282,7 +282,7 @@ class ChannelPlotWidget(QWidget):
             self._label_overlay.set_view(
                 getattr(buf, "channel_offset", 0),
                 getattr(buf, "n_visible", 0),
-                getattr(buf, "channel_order", "top_down") == "top_down",
+                self._is_top_down(),
                 y0,
                 slope,
                 z_scale,
@@ -343,6 +343,40 @@ class ChannelPlotWidget(QWidget):
                 buf = self._buffer
                 buf.set_channel_offset(buf.channel_offset + step)
                 self._update_range_label()
+
+    # ------------------------------------------------------------------
+    # Row <-> channel mapping
+    # ------------------------------------------------------------------
+    #
+    # A buffer lays its visible rows out along world-y, and "row 0" is the
+    # bottom of the canvas because that is what a plain arange of z-offsets
+    # produces. ``channel_order="top_down"`` reverses which channel lands on
+    # which row, so anything converting between a screen position and a channel
+    # has to go through here -- reading it off as ``channel_offset + row``
+    # silently inverts the answer whenever top_down is in force, which is the
+    # sweep's default.
+
+    def _is_top_down(self) -> bool:
+        """Whether the first visible channel is drawn at the top of the canvas.
+
+        A buffer that does not declare an order (the spectrum) offsets its rows
+        with a plain arange, so *absent* means bottom-up rather than the sweep's
+        default.
+        """
+        return getattr(self._buffer, "channel_order", "bottom_up") == "top_down"
+
+    def _channel_at_row(self, row: int) -> int:
+        """Absolute channel drawn at *row*, counting up from the canvas bottom."""
+        if self._is_top_down():
+            row = self._buffer.n_visible - 1 - row
+        return self._buffer.channel_offset + row
+
+    def _row_of_channel(self, channel: int) -> int:
+        """Row a channel is drawn at, counting up from the canvas bottom."""
+        row = channel - self._buffer.channel_offset
+        if self._is_top_down():
+            row = self._buffer.n_visible - 1 - row
+        return row
 
     def _channel_color(self, channel: int) -> tuple[float, float, float]:
         """Palette colour for an absolute channel index, as RGB.
@@ -477,8 +511,7 @@ class ChannelPlotWidget(QWidget):
                 best_dist = dist
                 best_idx = i
 
-        ch_index = best_idx
-        abs_ch = buf.channel_offset + ch_index
+        abs_ch = self._channel_at_row(best_idx)
 
         labels = self._channel_labels
         label = labels[abs_ch] if labels and abs_ch < len(labels) else f"Ch {abs_ch}"

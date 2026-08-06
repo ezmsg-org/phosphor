@@ -309,8 +309,7 @@ class SweepWidget(ChannelPlotWidget):
                 vis_end = buf.channel_offset + buf.n_visible
                 if ev.channel < vis_start or ev.channel >= vis_end:
                     continue
-                vis_idx = ev.channel - buf.channel_offset
-                y_center = vis_idx * self._z_offset_scale
+                y_center = self._row_of_channel(ev.channel) * self._z_offset_scale
                 y_min = y_center - 0.45 * self._z_offset_scale
                 y_max = y_center + 0.45 * self._z_offset_scale
 
