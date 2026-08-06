@@ -316,3 +316,14 @@ def test_clearing_and_refilling_brings_the_graphics_back():
     w._buffer.push(wave(2.0))
     w._refresh_lines()
     assert w._indiv_ml is not None
+
+
+def test_show_error_reads_back_what_was_resolved_not_what_was_asked():
+    """A band without statistics is not a band. Callers persist this value, so
+    reading back the request rather than the resolution would restore a setting
+    that never took effect."""
+    w = make_widget(show_error=True, track_statistics=False)
+    assert w.show_error is False
+
+    w = make_widget(show_error=True)
+    assert w.show_error is True

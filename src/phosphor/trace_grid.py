@@ -339,6 +339,15 @@ class TraceGridWidget(QtWidgets.QWidget):
         return self._show_mean
 
     @property
+    def show_error(self) -> bool:
+        """Whether the standard-deviation band is drawn.
+
+        Reads back the resolved value, not what was asked for: requesting a band
+        without statistics resolves to off, because there is no spread to draw.
+        """
+        return self._show_error
+
+    @property
     def autoscale(self) -> bool:
         return self._autoscale
 
