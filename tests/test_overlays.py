@@ -220,3 +220,16 @@ def test_scale_bar_sits_in_the_lower_right(bar, monkeypatch):
     _, y_top2, _, y_bot2 = lines[0]
     assert y_bot2 == y_bot
     assert y_top2 < y_top
+
+
+# ---- wheel direction -------------------------------------------------------
+
+
+def test_scroll_wheel_moves_the_channel_window_down_on_a_down_notch(qapp):
+    """Direction is easy to get backwards and only obvious in use."""
+    from phosphor.channel_plot import ChannelPlotWidget
+
+    step = ChannelPlotWidget._channel_scroll_step
+    assert step(1.0) == 1, "a positive wheel delta should advance the window"
+    assert step(-1.0) == -1
+    assert step(0.0) == 0, "a horizontal swipe carries dy=0 and must not scroll"

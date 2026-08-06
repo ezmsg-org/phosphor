@@ -334,10 +334,28 @@ class ChannelPlotWidget(QWidget):
             self._zoom_amplitude(factor)
         else:
             # Unmodified scroll → channel scroll
-            buf = self._buffer
-            step = 1 if delta < 0 else -1
-            buf.set_channel_offset(buf.channel_offset + step)
-            self._update_range_label()
+            step = self._channel_scroll_step(delta)
+            if step:
+                buf = self._buffer
+                buf.set_channel_offset(buf.channel_offset + step)
+                self._update_range_label()
+
+    @staticmethod
+    def _channel_scroll_step(delta: float) -> int:
+        """Channel-offset change for one wheel notch, 0 for no vertical motion.
+
+        Scrolling down moves the window down the channel list, so the traces
+        travel with the fingers the way a document does. Split out from the
+        handler so the direction can be tested without a canvas, since it is
+        the kind of thing that is obvious in use and invisible in review.
+
+        A horizontal trackpad swipe arrives as a wheel event carrying dx with
+        dy at 0, which is why 0 has to mean *stay*: taking it as a direction
+        makes sideways scrolling walk the channel window.
+        """
+        if delta == 0:
+            return 0
+        return 1 if delta > 0 else -1
 
     def _on_pointer_move_event(self, event) -> None:
         self._handle_mouse_move(event)
