@@ -8,7 +8,7 @@ import numpy as np
 from PySide6.QtWidgets import QWidget
 
 from .channel_plot import ChannelPlotWidget
-from .constants import CHANNEL_COLORS, DEFAULT_N_VISIBLE
+from .constants import DEFAULT_N_VISIBLE
 from .spectrum_buffer import SpectrumBuffer
 from .x_axis import XAxisWidget
 
@@ -118,8 +118,8 @@ class SpectrumWidget(ChannelPlotWidget):
         buf = self.spectrum_buffer
         data = buf.get_multiline_data(self._display_freq_max)
 
-        n_vis = buf.n_visible
-        colors = [CHANNEL_COLORS[i % len(CHANNEL_COLORS)][:3] for i in range(n_vis)]
+        offset = buf.channel_offset
+        colors = [self._channel_color(offset + i) for i in range(buf.n_visible)]
 
         self._multi_line = subplot.add_multi_line(
             data,

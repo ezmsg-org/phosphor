@@ -71,6 +71,11 @@ class ChannelPlotWidget(QWidget):
         # _buffer is set by the subclass before calling _init_rendering()
         self._buffer = None
 
+        # Trace colours, indexed by *absolute channel* so a channel keeps its
+        # colour as it scrolls -- see _channel_color. Subclasses override this
+        # with a configured palette before building graphics.
+        self._palette = list(CHANNEL_COLORS)
+
         # Overlays, created on demand. Kept as None until asked for so a plot
         # that never wants them pays nothing.
         self._label_overlay: ChannelLabelOverlay | None = None
@@ -330,8 +335,7 @@ class ChannelPlotWidget(QWidget):
             self._on_ctrl_scroll(delta)
         elif "Shift" in getattr(event, "modifiers", ()):
             # Shift+scroll → amplitude zoom
-            factor = 1.1 if delta > 0 else 0.9
-            self._zoom_amplitude(factor)
+            self._zoom_amplitude(1.1 if self._shift_wheel_delta(event) > 0 else 0.9)
         else:
             # Unmodified scroll → channel scroll
             step = self._channel_scroll_step(delta)
@@ -339,6 +343,30 @@ class ChannelPlotWidget(QWidget):
                 buf = self._buffer
                 buf.set_channel_offset(buf.channel_offset + step)
                 self._update_range_label()
+
+    def _channel_color(self, channel: int) -> tuple[float, float, float]:
+        """Palette colour for an absolute channel index, as RGB.
+
+        Keyed to the channel rather than the on-screen row so a trace keeps its
+        colour while the window scrolls past it -- the point of a colour here
+        is to let the eye follow one channel, which a colour that belongs to
+        the row actively defeats.
+        """
+        return tuple(self._palette[channel % len(self._palette)][:3])
+
+    @staticmethod
+    def _shift_wheel_delta(event) -> float:
+        """Wheel motion for Shift+scroll, from whichever axis it arrived on.
+
+        Holding Shift makes the OS report a mouse wheel as *horizontal*
+        scrolling -- the convention that scrolls a document sideways -- so the
+        motion arrives in dx with dy pinned at 0. Reading dy alone then makes
+        every notch look negative and amplitude only ever zooms out. A trackpad
+        reports both axes natively and is unaffected, which is why this shows
+        up on a mouse only.
+        """
+        dy = getattr(event, "dy", 0.0) or 0.0
+        return dy if dy else (getattr(event, "dx", 0.0) or 0.0)
 
     @staticmethod
     def _channel_scroll_step(delta: float) -> int:
@@ -455,8 +483,8 @@ class ChannelPlotWidget(QWidget):
         labels = self._channel_labels
         label = labels[abs_ch] if labels and abs_ch < len(labels) else f"Ch {abs_ch}"
 
-        rgba = CHANNEL_COLORS[ch_index % len(CHANNEL_COLORS)]
-        hex_color = f"#{int(rgba[0] * 255):02x}{int(rgba[1] * 255):02x}{int(rgba[2] * 255):02x}"
+        rgb = self._channel_color(abs_ch)
+        hex_color = f"#{int(rgb[0] * 255):02x}{int(rgb[1] * 255):02x}{int(rgb[2] * 255):02x}"
         html = f'<span style="color:{hex_color}">\u25a0</span> {label}'
         from PySide6.QtCore import QPoint
 

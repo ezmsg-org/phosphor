@@ -106,6 +106,7 @@ class SweepWidget(ChannelPlotWidget):
 
         # Create initial graphics
         self._cached_version = -1
+        self._cached_offset = -1
         self._multi_line = None
         self._z_offset_scale = 1.0
         self._cursor_line = None
@@ -157,6 +158,28 @@ class SweepWidget(ChannelPlotWidget):
     # Graphics setup
     # ------------------------------------------------------------------
 
+    def _visible_colors(self) -> list[tuple[float, float, float]]:
+        """RGB for each on-screen row, taken from its absolute channel."""
+        buf = self.sweep_buffer
+        offset = buf.channel_offset
+        return [self._channel_color(offset + i) for i in range(buf.n_visible)]
+
+    def _apply_channel_colors(self) -> None:
+        """Rewrite the MultiLine's colours after the window has scrolled.
+
+        fastplotlib stores every line's vertices in one flat colour buffer, so
+        a row's colours are a contiguous run of ``stride`` entries -- vertices
+        plus the NaN separator that ends the line.
+        """
+        ml = self._multi_line
+        buf = self.sweep_buffer
+        total = ml.colors.value.shape[0]
+        stride = total // max(buf.n_visible, 1)
+        rgba = np.ones((buf.n_visible, 4), dtype=np.float32)
+        rgba[:, :3] = np.asarray(self._visible_colors(), dtype=np.float32)
+        ml.colors[:] = np.repeat(rgba, stride, axis=0)[:total]
+        self._cached_offset = buf.channel_offset
+
     def _setup_graphics(self) -> None:
         """Create or recreate MultiLineGraphic and cursor line."""
         subplot = self._subplot
@@ -176,9 +199,11 @@ class SweepWidget(ChannelPlotWidget):
         buf = self.sweep_buffer
         data = buf.get_multiline_data()
 
-        # Build per-channel colors (cycling through configured palette)
+        # Colours follow the absolute channel, so a trace keeps its colour
+        # while the window scrolls past it.
         n_vis = buf.n_visible
-        colors = [self._palette[i % len(self._palette)][:3] for i in range(n_vis)]
+        colors = self._visible_colors()
+        self._cached_offset = buf.channel_offset
 
         self._multi_line = subplot.add_multi_line(
             data,
@@ -228,6 +253,12 @@ class SweepWidget(ChannelPlotWidget):
 
     def _update_graphics(self) -> None:
         buf = self.sweep_buffer
+
+        if buf.channel_offset != self._cached_offset and buf.version == self._cached_version:
+            # Scrolling keeps the graphic, so its colours have to be rewritten
+            # in place to stay with their channels. Only on an actual scroll:
+            # this reuploads the whole colour buffer.
+            self._apply_channel_colors()
 
         if buf.version != self._cached_version:
             # The graphic's own shape changed -- channel count, visible count,
