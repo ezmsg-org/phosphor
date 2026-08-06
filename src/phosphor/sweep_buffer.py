@@ -74,12 +74,16 @@ class SweepBuffer:
         self.n_columns = min(self._configured_n_columns, self.total_raw_samples)
         self.samples_per_column = self.total_raw_samples / self.n_columns
 
-        raw_shape = (self.total_raw_samples, self.n_visible)
+        # Every channel is buffered, not just the visible window. Scrolling is
+        # then a change of which slice is drawn, with no reallocation and
+        # nothing lost -- the alternative is that a channel scrolled into view
+        # has no history, because it was discarded on arrival.
+        raw_shape = (self.total_raw_samples, self.n_channels)
         if self.envelope:
             raw_shape += (2,)
         self.raw_buffer = np.zeros(raw_shape, dtype=np.float32)
-        self.display_mins = np.zeros((self.n_columns, self.n_visible), dtype=np.float32)
-        self.display_maxs = np.zeros((self.n_columns, self.n_visible), dtype=np.float32)
+        self.display_mins = np.zeros((self.n_columns, self.n_channels), dtype=np.float32)
+        self.display_maxs = np.zeros((self.n_columns, self.n_channels), dtype=np.float32)
 
         self.write_pos = 0
         self.sweep_col = 0
@@ -149,13 +153,7 @@ class SweepBuffer:
             elif n_ch > self.n_channels:
                 data = data[:, : self.n_channels]
 
-            # Select visible channels
-            end_ch = min(self.channel_offset + self.n_visible, self.n_channels)
-            vis_data = data[:, self.channel_offset : end_ch].astype(np.float32)
-            if vis_data.shape[1] < self.n_visible:
-                pad = [(0, 0)] * vis_data.ndim
-                pad[1] = (0, self.n_visible - vis_data.shape[1])
-                vis_data = np.pad(vis_data, pad)
+            vis_data = data.astype(np.float32, copy=False)
 
             # Truncate if more data than one full sweep
             if n_samples > self.total_raw_samples:
@@ -215,19 +213,35 @@ class SweepBuffer:
                 self._allocate()
 
     def set_channel_offset(self, offset: int) -> None:
+        """Scroll the visible window. Cheap: no reallocation, nothing lost.
+
+        Every channel is already buffered, so this only changes which slice is
+        drawn. The graphic keeps its shape -- ``n_visible`` rows either way --
+        so there is no version bump and no rebuild; the next frame simply
+        redraws every column from the new window.
+        """
         with self._lock:
             offset = max(0, min(offset, self.n_channels - self.n_visible))
             if offset != self.channel_offset:
                 self.channel_offset = offset
-                self._allocate()
+                self._mark_all_dirty()
 
     def set_n_visible(self, n: int) -> None:
+        """Change how many channels are drawn, keeping their history.
+
+        The stored data is untouched -- only the height of the window over it
+        changes. The multiline graphic does change shape, so the version is
+        bumped to have it rebuilt, but that is a GPU-side rebuild rather than a
+        data reset: the traces reappear already populated.
+        """
         with self._lock:
             n = max(1, min(n, self.n_channels))
             if n != self.n_visible:
                 self.n_visible = n
                 self.channel_offset = min(self.channel_offset, self.n_channels - self.n_visible)
-                self._allocate()
+                self._ch_mid = np.zeros((self.n_visible, 1), dtype=np.float32)
+                self._mark_all_dirty()
+                self._version += 1
 
     def set_display_dur(self, dur: float) -> None:
         with self._lock:
@@ -261,6 +275,20 @@ class SweepBuffer:
     def version(self) -> int:
         return self._version
 
+    def _mark_all_dirty(self) -> None:
+        """Force a full redraw on the next frame. Call while holding ``_lock``."""
+        self._dirty_start = 0
+        self._dirty_end = self.n_columns - 1
+
+    def _visible(self) -> slice:
+        """The channel slice currently on screen.
+
+        Storage spans every channel; this is the window drawn from it.
+        Normalization and midpoints use it too, so the amplitude scale follows
+        what the user can see rather than channels off-screen.
+        """
+        return slice(self.channel_offset, self.channel_offset + self.n_visible)
+
     def _compute_y_scale(self) -> float:
         """Compute normalization scale from current buffer data.
 
@@ -268,7 +296,11 @@ class SweepBuffer:
         that normalized data fits within ±0.5, matching MultiLine z_offset_scale separation.
         Must be called while holding ``_lock``.
         """
-        max_abs = max(float(np.abs(self.display_mins).max()), float(np.abs(self.display_maxs).max()))
+        vis = self._visible()
+        max_abs = max(
+            float(np.abs(self.display_mins[:, vis]).max()),
+            float(np.abs(self.display_maxs[:, vis]).max()),
+        )
         return 0.5 / max(max_abs, 1e-12)
 
     def _compute_ch_mid(self, scale: float) -> np.ndarray:
@@ -279,8 +311,9 @@ class SweepBuffer:
         translating channels as the user changes ``amplitude_scale``.
         Must be called while holding ``_lock``.
         """
-        ch_min = self.display_mins.min(axis=0)
-        ch_max = self.display_maxs.max(axis=0)
+        vis = self._visible()
+        ch_min = self.display_mins[:, vis].min(axis=0)
+        ch_max = self.display_maxs[:, vis].max(axis=0)
         return (((ch_min + ch_max) / 2) * scale).astype(np.float32).reshape(-1, 1)
 
     def _build_multiline_array(self, mins, maxs, col_indices, scale) -> np.ndarray:
@@ -288,6 +321,9 @@ class SweepBuffer:
 
         Must be called while holding ``_lock``.
         """
+        vis = self._visible()
+        mins = mins[:, vis]
+        maxs = maxs[:, vis]
         n_cols = mins.shape[0]
         out = np.zeros((self.n_visible, 2 * n_cols, 3), dtype=np.float32)
         col_x = col_indices.astype(np.float32) / max(self.n_columns - 1, 1) * self.display_dur
@@ -325,9 +361,7 @@ class SweepBuffer:
             if scale == self._amplitude_scale:
                 return
             self._amplitude_scale = scale
-            # Force a full rebuild on the next animation frame.
-            self._dirty_start = 0
-            self._dirty_end = self.n_columns - 1
+            self._mark_all_dirty()
 
     def set_channel_order(self, order: str) -> None:
         if order not in ("top_down", "bottom_up"):
@@ -336,8 +370,7 @@ class SweepBuffer:
             if order == self.channel_order:
                 return
             self.channel_order = order
-            self._dirty_start = 0
-            self._dirty_end = self.n_columns - 1
+            self._mark_all_dirty()
 
     def get_multiline_data(self) -> np.ndarray:
         """Full data shaped ``[n_visible, 2*n_columns, 3]`` for fastplotlib MultiLineGraphic.
@@ -489,8 +522,10 @@ class SweepBuffer:
         # New write position: same total-sample count, different modulus
         new_write_pos = self._samples_since_alloc % new_total
 
-        # Create new (zeroed) buffer
-        new_raw = np.zeros((new_total, self.n_visible), dtype=np.float32)
+        # Create new (zeroed) buffer. Shape derived from the existing one so it
+        # keeps both the full channel width and, in envelope mode, the trailing
+        # (min, max) pair -- writing n_visible here silently mis-sized it.
+        new_raw = np.zeros((new_total,) + self.raw_buffer.shape[1:], dtype=np.float32)
 
         # Copy data preserving sample ages
         available = min(self._samples_since_alloc, old_total)
@@ -523,8 +558,8 @@ class SweepBuffer:
         self.sweep_col = self._col_for_pos(new_write_pos)
 
         # Recompute display columns from new raw data
-        self.display_mins = np.zeros((new_n_columns, self.n_visible), dtype=np.float32)
-        self.display_maxs = np.zeros((new_n_columns, self.n_visible), dtype=np.float32)
+        self.display_mins = np.zeros((new_n_columns, self.n_channels), dtype=np.float32)
+        self.display_maxs = np.zeros((new_n_columns, self.n_channels), dtype=np.float32)
         self._recompute_columns(0, new_n_columns)
 
         self._dirty_start = None

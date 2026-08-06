@@ -230,7 +230,11 @@ class SweepWidget(ChannelPlotWidget):
         buf = self.sweep_buffer
 
         if buf.version != self._cached_version:
-            # Version changed (scroll, resize, display_dur change) → full rebuild
+            # The graphic's own shape changed -- channel count, visible count,
+            # sample rate, display duration -- so the MultiLine has to be
+            # rebuilt. Scrolling deliberately does not land here: it keeps
+            # n_visible rows and only marks the columns dirty, so it flows
+            # through the incremental path below and the plot never blanks.
             self._setup_graphics()
             return
 

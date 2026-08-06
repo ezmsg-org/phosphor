@@ -160,3 +160,115 @@ def test_envelope_scale_and_midpoint_use_both_bounds():
     assert buf.display_maxs.max() == pytest.approx(4.0)
     # ±0.5 normalization over a ±4 range.
     assert buf._compute_y_scale() == pytest.approx(0.125)
+
+
+# ---- scrolling keeps what it already drew ----------------------------------
+#
+# Scrolling by one channel used to reallocate every buffer, so 31 of 32 rows
+# were thrown away and redrawn from nothing even though their data had not
+# changed. The fix is that storage spans every channel and the visible window
+# is a view over it.
+
+
+def channel_ramp(n_samples: int, n_channels: int) -> np.ndarray:
+    """Each channel holds its own index, so a row's identity is its value."""
+    return np.tile(np.arange(n_channels, dtype=np.float32), (n_samples, 1))
+
+
+def test_all_channels_are_buffered_not_just_the_visible_ones():
+    buf = make_buffer(n_channels=64, n_visible=8)
+    assert buf.raw_buffer.shape[1] == 64
+    assert buf.display_mins.shape[1] == 64
+
+
+def test_scrolling_does_not_reallocate_or_rebuild():
+    """A rebuild is what blanks the plot; the graphic keeps its shape here."""
+    buf = make_buffer(n_channels=64, n_visible=8)
+    buf.push_data(channel_ramp(1000, 64))
+
+    version, raw = buf.version, buf.raw_buffer
+    buf.set_channel_offset(1)
+
+    assert buf.version == version, "scrolling must not force a graphic rebuild"
+    assert buf.raw_buffer is raw, "scrolling must not reallocate the ring"
+
+
+def test_scrolled_rows_keep_their_data():
+    """The 31-of-32 case: everything that was on screen stays on screen.
+
+    Asserted on the reduced columns rather than the multiline's y values,
+    because those are normalized to the visible window -- scrolling onto a
+    larger channel legitimately rescales every row, which would swamp the
+    thing being checked.
+    """
+    buf = make_buffer(n_channels=64, n_visible=8)
+    buf.push_data(channel_ramp(1000, 64))
+
+    before = buf.display_maxs.copy()
+    buf.set_channel_offset(1)
+
+    # Storage is untouched by scrolling; the window moved over it.
+    np.testing.assert_array_equal(buf.display_maxs, before)
+    # The seven rows that were already on screen are the same seven channels.
+    np.testing.assert_allclose(buf.display_maxs[:, 1:8].max(axis=0), np.arange(1, 8))
+    # And the newly exposed row carries real data, not zeros.
+    assert buf.display_maxs[:, 8].max() == pytest.approx(8.0)
+    assert buf.get_multiline_data().shape[0] == 8
+
+
+def test_a_channel_scrolled_into_view_has_history_immediately():
+    """The case no amount of copy-on-scroll could fix: the data has to have
+    been kept while the channel was off screen."""
+    buf = make_buffer(n_channels=64, n_visible=4)
+    buf.push_data(channel_ramp(1000, 64))
+
+    buf.set_channel_offset(60)  # jump well past anything ever displayed
+    data = buf.get_multiline_data()
+
+    assert data.shape[0] == 4
+    # Channels 60..63 were never visible, yet their columns are populated.
+    np.testing.assert_allclose(buf.display_maxs[:, 60:64].max(axis=0), [60.0, 61.0, 62.0, 63.0])
+
+
+def test_changing_visible_count_keeps_history_too():
+    """Paging with /2 and x2 has the same problem and the same fix."""
+    buf = make_buffer(n_channels=64, n_visible=8)
+    buf.push_data(channel_ramp(1000, 64))
+    raw = buf.raw_buffer
+
+    buf.set_n_visible(16)
+
+    assert buf.raw_buffer is raw, "resizing the window must not reallocate"
+    assert buf.get_multiline_data().shape[0] == 16
+    np.testing.assert_allclose(buf.display_maxs[:, :16].max(axis=0), np.arange(16))
+
+
+def test_normalization_follows_the_visible_window():
+    """Amplitude scale must track what is on screen -- an off-screen channel
+    ten times larger should not flatten everything the user is looking at."""
+    buf = make_buffer(n_channels=8, n_visible=2)
+    data = np.zeros((1000, 8), dtype=np.float32)
+    data[:, 0:2] = 1.0
+    data[:, 7] = 100.0  # far off screen
+    buf.push_data(data)
+
+    buf.get_multiline_data()
+    assert buf._compute_y_scale() == pytest.approx(0.5)  # keyed to the visible 1.0
+
+    buf.set_channel_offset(6)  # now channel 7 is visible
+    assert buf._compute_y_scale() == pytest.approx(0.005)
+
+
+def test_time_zoom_preserves_the_envelope_pair_axis():
+    """_resize_display_dur rebuilt the ring at the wrong rank in envelope mode,
+    so zooming time with the envelope on mis-sized the buffer."""
+    buf = make_buffer(n_channels=4, n_visible=4, envelope=True)
+    env = np.zeros((1000, 4, 2), dtype=np.float32)
+    env[..., 0], env[..., 1] = -3.0, 3.0
+    buf.push_data(env)
+
+    buf.set_display_dur(0.5)
+
+    assert buf.raw_buffer.ndim == 3
+    assert buf.raw_buffer.shape[1:] == (4, 2)
+    assert buf.display_maxs.max() == pytest.approx(3.0)
