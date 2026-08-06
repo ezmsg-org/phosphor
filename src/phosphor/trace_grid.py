@@ -590,13 +590,20 @@ class TraceGridWidget(QtWidgets.QWidget):
         return mean_pos, self._curve_positions(minmax_decimate(band, self._dec_plan))
 
     def _curve_positions(self, curve: np.ndarray) -> np.ndarray:
-        """One line per row of *curve*, laid into the cells."""
+        """One line per row of *curve*, laid into the cells.
+
+        *curve* holds a whole number of per-channel blocks -- one for a mean,
+        two for the lower and upper edges of a band. Each block is mapped on its
+        own, because the cell mapping is per channel and would otherwise be
+        asked to broadcast a block of channels against twice as many rows.
+        """
         n_lines, m = curve.shape[0], curve.shape[-1]
-        pos = np.empty((n_lines, m, 3), dtype=np.float32)
-        # The band is two curves per channel, so x tiles rather than broadcasts.
         reps = n_lines // self._n_ch
+        pos = np.empty((n_lines, m, 3), dtype=np.float32)
         pos[..., 0] = np.tile(self._x_line_dec, (reps, 1))
-        pos[..., 1] = self._map_y(curve)
+        for i in range(reps):
+            block = slice(i * self._n_ch, (i + 1) * self._n_ch)
+            pos[block, :, 1] = self._map_y(curve[block])
         pos[..., 2] = 0.0
         return pos
 

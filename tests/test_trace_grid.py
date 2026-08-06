@@ -33,8 +33,11 @@ def make_widget(n_ch=2, n_samples=4, history=3, **config_kwargs) -> TraceGridWid
     w._x_line_dec = np.tile(np.arange(n_samples, dtype=np.float32), (n_ch, 1))
     w._indiv_ml = w._mean_ml = w._error_ml = None
     w._graphics_version = -1
-    # _map_y is affine per channel; identity keeps these tests about layout.
-    w._map_y = lambda a: np.asarray(a, dtype=np.float32)
+    # The real _map_y, not a stub. It is per channel, and stubbing it is what
+    # let a band of 2 x n_ch rows reach it and raise on every frame while the
+    # tests stayed green.
+    w._rects = np.column_stack([np.zeros(n_ch), np.arange(n_ch, dtype=float), np.ones(n_ch)])
+    w._y_min, w._y_max = -1000.0, 1000.0
     return w
 
 
@@ -196,7 +199,9 @@ def test_the_mean_spans_more_waveforms_than_are_drawn():
         w._buffer.push(wave(v, n_ch=1))
 
     mean_pos, _ = w._summary_positions()
-    np.testing.assert_allclose(mean_pos[0, :, 1], 3.0)  # mean of 1..5, not of 4..5
+    # Compared through the cell mapping, since that is what the drawn y is.
+    expected = w._map_y(np.full((1, w._n_samples), 3.0, dtype=np.float32))  # 1..5, not 4..5
+    np.testing.assert_allclose(mean_pos[0, :, 1], expected[0], rtol=1e-6)
 
 
 # ---- graphics actually get created ------------------------------------------
@@ -286,7 +291,8 @@ def test_the_newest_waveform_reaches_the_graphic():
     w._refresh_lines()
 
     ys = w._indiv_ml.data[..., 1]
-    assert np.isclose(ys, 7.0).any(), "the value just pushed should be in the graphic"
+    expected = w._map_y(np.full((w._n_ch, w._n_samples), 7.0, dtype=np.float32))[0, 0]
+    assert np.isclose(ys, expected).any(), "the value just pushed should be in the graphic"
 
 
 def test_the_error_band_appears_once_there_is_a_spread():
