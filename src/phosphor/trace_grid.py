@@ -539,17 +539,30 @@ class TraceGridWidget(QtWidgets.QWidget):
         pos[..., 2] = 0.0
         return pos.reshape(buf.history * self._n_ch, m, 3), m
 
-    def _individual_colors(self, n_points: int) -> np.ndarray:
-        """Flat per-vertex colours for the individual-waveform graphic.
+    def _individual_colors(self) -> np.ndarray:
+        """One RGBA per line, ``(history * n_ch, 4)``, faded by slot age.
 
-        fastplotlib keeps every line's vertices in one buffer, so a per-line
-        colour is a run of ``n_points`` entries -- which is why fading by age
-        costs the whole buffer and a flat colour costs nothing after build.
+        What ``add_multi_line`` takes. Writing into an existing graphic needs
+        the per-vertex form instead -- see :meth:`_expand_colors`.
         """
         buf = self._buffer
         rgba = np.tile(np.asarray(self._config.individual_color, dtype=np.float32), (buf.history, self._n_ch, 1))
         rgba[..., 3] = self._slot_alpha()[:, None]
-        return np.repeat(rgba.reshape(-1, 4), n_points, axis=0)
+        return rgba.reshape(-1, 4)
+
+    @staticmethod
+    def _expand_colors(graphic, per_line: np.ndarray) -> np.ndarray:
+        """Per-line colours as the flat per-vertex buffer a graphic holds.
+
+        fastplotlib takes one colour per line when a graphic is built and then
+        stores one per vertex, so an in-place recolour has to repeat each line's
+        colour across its own run. The stride comes from the buffer rather than
+        the point count because it also covers whatever separator vertices the
+        renderer inserted between lines.
+        """
+        total = graphic.colors.value.shape[0]
+        stride = total // max(per_line.shape[0], 1)
+        return np.repeat(per_line, stride, axis=0)[:total]
 
     def _summary_positions(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Mean and +/- one standard deviation, decimated for display.
@@ -579,14 +592,26 @@ class TraceGridWidget(QtWidgets.QWidget):
         return pos
 
     def _graphics_shape(self) -> tuple:
-        """What the current graphics were built for. A change means recreate."""
+        """Which graphics should exist and how big. A change means recreate.
+
+        The flags say *should this be drawn at all*, not just whether the user
+        asked for it, because the widget is built before its first waveform
+        arrives. A key that described only sizes and toggles would settle on
+        "nothing to draw" against the empty buffer and never change when data
+        turned up -- every arrival would take the in-place path, find no
+        graphics to write into, and draw nothing.
+        """
+        buf = self._buffer
+        has_data = buf.n_retained > 0
         return (
-            self._buffer.history,
+            buf.history,
             self._n_ch,
             self._dec_plan.n_out,
-            self._show_individual,
-            self._show_mean,
-            self._show_error,
+            self._show_individual and has_data,
+            self._show_mean and has_data and buf.track_statistics,
+            # A spread needs a second waveform, so the band appears later than
+            # the mean does.
+            self._show_error and buf.track_statistics and buf.n_seen > 1,
         )
 
     def _refresh_lines(self) -> None:
@@ -600,10 +625,10 @@ class TraceGridWidget(QtWidgets.QWidget):
         """Write new numbers into the graphics that already exist."""
         buf = self._buffer
         if self._indiv_ml is not None and buf.n_retained:
-            pos, m = self._individual_positions()
+            pos, _ = self._individual_positions()
             self._indiv_ml.data[:] = pos
             if self._config.age_fade:
-                self._indiv_ml.colors[:] = self._individual_colors(m)
+                self._indiv_ml.colors[:] = self._expand_colors(self._indiv_ml, self._individual_colors())
         mean_pos, band_pos = self._summary_positions()
         if self._mean_ml is not None and mean_pos is not None:
             self._mean_ml.data[:] = mean_pos
@@ -628,10 +653,10 @@ class TraceGridWidget(QtWidgets.QWidget):
             return
 
         if self._show_individual:
-            pos, m = self._individual_positions()
+            pos, _ = self._individual_positions()
             self._indiv_ml = self._subplot.add_multi_line(
                 pos,
-                colors=self._individual_colors(m),
+                colors=self._individual_colors(),
                 thickness=self._config.individual_thickness,
             )
             self._indiv_ml.visible = self._show_individual

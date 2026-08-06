@@ -116,7 +116,9 @@ def test_a_new_waveform_does_not_change_the_graphics_shape():
 )
 def test_anything_that_adds_or_removes_lines_does_change_it(change):
     w = make_widget(history=3)
+    # Two, so there is a standard deviation and the error toggle has an effect.
     w._buffer.push(wave(1.0))
+    w._buffer.push(wave(3.0))
     shape = w._graphics_shape()
 
     change(w)
@@ -195,3 +197,122 @@ def test_the_mean_spans_more_waveforms_than_are_drawn():
 
     mean_pos, _ = w._summary_positions()
     np.testing.assert_allclose(mean_pos[0, :, 1], 3.0)  # mean of 1..5, not of 4..5
+
+
+# ---- graphics actually get created ------------------------------------------
+
+
+class FakeColors:
+    """fastplotlib takes one colour per line, then holds one per vertex."""
+
+    def __init__(self, n_lines, n_points):
+        self.value = np.zeros((n_lines * n_points, 4), dtype=np.float32)
+
+    def __setitem__(self, key, value):
+        self.value[key] = value
+
+
+class FakeGraphic:
+    def __init__(self, data):
+        self.data = np.asarray(data).copy()
+        self.colors = FakeColors(self.data.shape[0], self.data.shape[1])
+        self.visible = True
+
+
+class FakeSubplot:
+    """Records what a renderer would have been asked to draw."""
+
+    def __init__(self):
+        self.created: list[FakeGraphic] = []
+        self.deleted: list[FakeGraphic] = []
+
+    def add_multi_line(self, data, colors=None, thickness=None, **_):
+        g = FakeGraphic(data)
+        self.created.append(g)
+        return g
+
+    def delete_graphic(self, graphic):
+        self.deleted.append(graphic)
+
+
+def drivable(**kwargs) -> TraceGridWidget:
+    w = make_widget(**kwargs)
+    w._subplot = FakeSubplot()
+    return w
+
+
+def test_the_first_waveform_creates_the_graphics():
+    """The regression that showed up as a grid of empty cells with epochs
+    arriving: the widget is built before any data, so the first frame rebuilds
+    against an empty buffer. If that state is indistinguishable from a
+    populated one, every later arrival takes the in-place path, finds nothing
+    to write into, and draws nothing -- for as long as the app runs.
+    """
+    w = drivable(history=3)
+
+    w._refresh_lines()  # a frame before any data, as happens on startup
+    assert w._subplot.created == [], "nothing to draw yet"
+
+    w._buffer.push(wave(1.0))
+    w._refresh_lines()
+
+    assert w._subplot.created, "the first waveform must bring its graphics with it"
+    assert w._indiv_ml is not None
+
+
+def test_later_waveforms_write_in_place_instead_of_recreating():
+    """The other half: once the graphics exist, arrivals must not rebuild."""
+    w = drivable(history=3)
+    w._buffer.push(wave(1.0))
+    w._refresh_lines()
+    created = len(w._subplot.created)
+
+    for v in (2.0, 3.0, 4.0):
+        w._buffer.push(wave(v))
+        w._refresh_lines()
+
+    assert len(w._subplot.created) == created, "arrivals should not recreate graphics"
+    assert w._subplot.deleted == []
+
+
+def test_the_newest_waveform_reaches_the_graphic():
+    """An in-place path that silently wrote nowhere would look identical to a
+    working one until you looked at the screen."""
+    w = drivable(history=3, show_mean=False)
+    w._buffer.push(wave(1.0))
+    w._refresh_lines()
+
+    w._buffer.push(wave(7.0))
+    w._refresh_lines()
+
+    ys = w._indiv_ml.data[..., 1]
+    assert np.isclose(ys, 7.0).any(), "the value just pushed should be in the graphic"
+
+
+def test_the_error_band_appears_once_there_is_a_spread():
+    """It cannot be drawn from one waveform, so it arrives a frame later than
+    the mean and needs its own place in the shape key."""
+    w = drivable(history=4, show_error=True)
+
+    w._buffer.push(wave(1.0))
+    w._refresh_lines()
+    assert w._error_ml is None
+
+    w._buffer.push(wave(3.0))
+    w._refresh_lines()
+    assert w._error_ml is not None
+
+
+def test_clearing_and_refilling_brings_the_graphics_back():
+    """clear() drops to the empty state; refilling has to leave it again."""
+    w = drivable(history=3)
+    w._buffer.push(wave(1.0))
+    w._refresh_lines()
+
+    w._buffer.clear()
+    w._refresh_lines()
+    assert w._indiv_ml is None
+
+    w._buffer.push(wave(2.0))
+    w._refresh_lines()
+    assert w._indiv_ml is not None
