@@ -235,11 +235,20 @@ class ChannelPlotWidget(QWidget):
         if subplot is None:
             return None, None
         buf = self._buffer
-        size = self._fpl_widget.size()
         camera = getattr(subplot, "camera", None)
+        # Keyed on the subplot's viewport rect rather than the canvas widget's
+        # size. The two usually move together, but the viewport is what
+        # map_world_to_screen actually reads, so the widget size was only ever
+        # standing in for it -- and anything that reshapes the viewport without
+        # resizing the canvas leaves nothing in the key to invalidate. Nothing
+        # else would catch it either: the sweep's camera height follows
+        # n_visible alone, so it does not move on a resize. The labels would
+        # then keep a projection built for the previous geometry -- stretched
+        # or compressed against the traces -- until an unrelated change to
+        # n_visible or the scroll position happened to evict it.
+        viewport = getattr(subplot, "viewport", None)
         key = (
-            size.width(),
-            size.height(),
+            tuple(viewport.rect) if viewport is not None else None,
             getattr(buf, "n_visible", None),
             getattr(self, "_z_offset_scale", 1.0),
             float(camera.height) if camera is not None else None,

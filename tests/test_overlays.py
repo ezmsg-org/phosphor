@@ -7,6 +7,7 @@ kind of thing that survives a screenshot review. The maths is all in
 """
 
 import pytest
+from PySide6 import QtCore
 
 from phosphor.overlays import (
     MAX_LABEL_FONT_PX,
@@ -220,3 +221,67 @@ def test_scale_bar_sits_in_the_lower_right(bar, monkeypatch):
     _, y_top2, _, y_bot2 = lines[0]
     assert y_bot2 == y_bot
     assert y_top2 < y_top
+
+
+# ---- projection cache ------------------------------------------------------
+
+
+class _Viewport:
+    def __init__(self, rect):
+        self.rect = rect
+
+
+class _Subplot:
+    """Enough of a subplot to probe: a viewport, a camera, and a mapping that
+    reads the viewport the way fastplotlib's own does."""
+
+    def __init__(self, rect=(0.0, 0.0, 800.0, 600.0)):
+        self.viewport = _Viewport(rect)
+        self.camera = type("Cam", (), {"height": 16.5, "world": type("W", (), {"position": (0.0, 7.5, 0.0)})()})()
+
+    def map_world_to_screen(self, pos):
+        _, _, _, h = self.viewport.rect
+        y_offset = self.viewport.rect[1]
+        ndc_y = (pos[1] - self.camera.world.position[1]) / (self.camera.height / 2)
+        return 0.0, y_offset + (1 - ndc_y) * 0.5 * h
+
+
+def _probe(subplot):
+    from phosphor.channel_plot import ChannelPlotWidget
+
+    plot = ChannelPlotWidget.__new__(ChannelPlotWidget)  # no canvas needed
+    plot._subplot = subplot
+    # A canvas whose size never changes, so that keying on it -- which is the
+    # mistake this pins -- would hold the cache shut rather than error out.
+    plot._fpl_widget = type("W", (), {"size": staticmethod(lambda: QtCore.QSize(800, 600))})()
+    plot._buffer = type("Buf", (), {"n_visible": 16})()
+    plot._z_offset_scale = 1.0
+    plot._projection = None
+    plot._projection_key = None
+    return plot
+
+
+def test_projection_follows_the_viewport_not_the_canvas_size():
+    """The cache has to key on what the mapping actually reads.
+
+    Keying on the canvas widget's size instead works right up until something
+    reshapes the viewport without resizing the canvas, at which point nothing
+    is left to evict the entry -- a sweep's camera height follows n_visible
+    alone, so it does not move on a resize either. The labels then keep a
+    projection built for the old geometry and sit stretched or compressed
+    against their traces indefinitely.
+    """
+    subplot = _Subplot((0.0, 0.0, 800.0, 600.0))
+    plot = _probe(subplot)
+
+    first = plot._screen_y_projection()
+    assert plot._screen_y_projection() == first, "unchanged view should hit the cache"
+
+    subplot.viewport.rect = (0.0, 40.0, 800.0, 520.0)
+    second = plot._screen_y_projection()
+
+    assert second != first
+    y0, slope = second
+    for world_y in (0.0, 7.5, 15.0):
+        expected = subplot.map_world_to_screen((0.0, world_y, 0.0))[1]
+        assert y0 + slope * world_y == pytest.approx(expected, abs=1e-6)
