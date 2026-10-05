@@ -149,3 +149,27 @@ def test_tooltip_formats_any_finite_value(value):
     w = make_grid(1, value_unit="uV")
     w.push_data(np.array([value]))
     assert w._tooltip_text(0).startswith("ch0\n")
+
+
+# ---- geometry ----------------------------------------------------------------
+
+
+def test_hovering_finds_the_rectangle_under_the_pointer():
+    w = make_grid(2)
+    w._rects = np.array([[0.0, 0.0, 2.0, 1.0], [2.0, 0.0, 1.0, 3.0]])
+    assert w._channel_at(1.5, 0.5) == 0
+    assert w._channel_at(2.5, 2.5) == 1
+    assert w._channel_at(1.5, 2.5) == -1
+
+
+def test_outlines_are_drawn_in_position_space():
+    from phosphor.grid_layout import Outline
+
+    w = make_grid(1)
+    drawn = []
+    w._subplot = type("Subplot", (), {"add_line": lambda self, data, **kw: drawn.append((data, kw)) or data})()
+    segments = np.array([[[0.0, 0.0], [4.0, 0.0]]])
+    w._add_outlines((Outline(segments, (0.5, 0.5, 0.5, 1.0), 2.0), Outline(np.zeros((0, 2, 2)))), invert_y=True)
+    ((data, kw),) = drawn
+    np.testing.assert_allclose(data[:2, :2], [[0.0, -0.0], [4.0, -0.0]])
+    assert kw == {"colors": (0.5, 0.5, 0.5, 1.0), "thickness": 2.0}

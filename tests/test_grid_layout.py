@@ -160,3 +160,35 @@ def test_quad_mesh_of_no_cells_is_empty_not_malformed():
     positions, indices = build_quad_mesh_arrays(np.zeros((0, 3)))
     assert positions.shape == (0, 3)
     assert indices.shape == (0, 3)
+
+
+def test_sizes_may_be_widths_and_heights():
+    positions = np.array([[0.0, 0.0], [4.0, 0.0]])
+    rects, centers = resolve_cell_geometry(positions, np.array([[2.0, 1.0], [4.0, 4.0]]), 2, invert_y=False)
+    np.testing.assert_allclose(rects, [[0.0, 0.0, 2.0, 1.0], [4.0, 0.0, 4.0, 4.0]])
+    np.testing.assert_allclose(centers, [[1.0, 0.5], [6.0, 2.0]])
+
+
+def test_a_rectangle_flips_about_its_own_height():
+    rects, _ = resolve_cell_geometry(np.array([[0.0, 2.0], [3.0, 0.0]]), np.array([[2.0, 1.0], [1.0, 3.0]]), 2, True)
+    # y0 = -(y + height): the rectangle keeps its height and covers -(y+h)..-y.
+    np.testing.assert_allclose(rects[:, 1], [-3.0, -3.0])
+    np.testing.assert_allclose(rects[:, 3], [1.0, 3.0])
+
+
+def test_rectangles_tessellate_to_their_corners():
+    positions, indices = build_quad_mesh_arrays(np.array([[1.0, 2.0, 3.0, 4.0]]))
+    np.testing.assert_allclose(positions[:, :2], [[1, 2], [4, 2], [4, 6], [1, 6]])
+    assert indices.shape == (2, 3)
+
+
+def test_outline_segments_become_one_broken_polyline_flipped_like_the_cells():
+    from phosphor.grid_layout import outline_vertices
+
+    segments = np.array([[[0.0, 0.0], [4.0, 0.0]], [[0.0, 1.0], [0.0, 3.0]]])
+    upright = outline_vertices(segments, invert_y=False)
+    assert upright.shape == (6, 3)
+    np.testing.assert_allclose(upright[[0, 1, 3, 4], :2], [[0, 0], [4, 0], [0, 1], [0, 3]])
+    assert np.isnan(upright[[2, 5]]).all()
+    flipped = outline_vertices(segments, invert_y=True)
+    np.testing.assert_allclose(flipped[[3, 4], 1], [-1.0, -3.0])

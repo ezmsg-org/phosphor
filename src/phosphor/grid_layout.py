@@ -2,9 +2,9 @@
 
 A per-channel value heatmap and a per-channel trace grid draw completely
 different things into their cells, but agree entirely on where the cells go:
-one square per channel at its ``(x, y)``, sized per channel, with a sensible
-layout when the positions are missing or degenerate. That agreement is what
-lives here.
+one rectangle per channel at its ``(x, y)``, sized per channel (a side, or a
+width and height), with a sensible layout when the positions are missing or
+degenerate. That agreement is what lives here.
 
 * :func:`tiled_grid_positions` — a square-ish fallback layout for sources that
   carry no positions at all.
@@ -13,10 +13,12 @@ lives here.
 * :func:`infer_pitch` — the spacing between adjacent channels, which is what a
   cell defaults to when no size is given.
 * :func:`resolve_cell_geometry` — ``(positions, sizes)`` into per-channel
-  rectangles ``(x0, y0, side)`` and centers, honouring ``invert_y`` and the
-  degenerate "every channel at one point" case.
+  rectangles ``(x0, y0, width, height)`` and centers, honouring ``invert_y``
+  and the degenerate "every channel at one point" case.
 * :func:`build_quad_mesh_arrays` — tessellate those rects into a quad mesh, for
   a renderer that fills cells rather than drawing into them.
+* :func:`outline_vertices` — line segments in position space (cell borders,
+  say) as one NaN-separated polyline, flipped like the cells under ``invert_y``.
 
 Positions are plain arrays. Deriving them from a particular data model's
 channel metadata is that model's business, not this module's.
@@ -25,14 +27,17 @@ channel metadata is that model's business, not this module's.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "Outline",
     "build_quad_mesh_arrays",
     "infer_pitch",
+    "outline_vertices",
     "resolve_cell_geometry",
     "tile_by_group",
     "tiled_grid_positions",
@@ -123,9 +128,11 @@ def resolve_cell_geometry(
     n_ch: int,
     invert_y: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-channel display rects ``(x0, y0, side)`` and centers ``(cx, cy)``.
+    """Per-channel display rects ``(x0, y0, width, height)`` and centers ``(cx, cy)``.
 
-    ``(x0, y0)`` is each cell's lower-left corner. When ``invert_y`` is set the
+    ``(x0, y0)`` is each cell's lower-left corner. ``sizes`` is ``(n_ch,)``
+    square sides or ``(n_ch, 2)`` widths and heights; a non-positive entry
+    falls back to the inferred pitch. When ``invert_y`` is set the
     layout is flipped about the x-axis so low-``y`` electrodes render at the top
     while each cell stays axis-aligned with its corner anchoring intact.
 
@@ -143,30 +150,65 @@ def resolve_cell_geometry(
         side = int(np.ceil(np.sqrt(n_ch)))
         xs = (np.arange(n_ch) % side).astype(np.float64)
         ys = (np.arange(n_ch) // side).astype(np.float64)
-        cell_sizes = np.ones(n_ch, dtype=np.float64)
+        widths = heights = np.ones(n_ch, dtype=np.float64)
     else:
         pitch = infer_pitch(xs, ys)
         if sizes is None:
-            cell_sizes = np.full(n_ch, pitch, dtype=np.float64)
+            widths = heights = np.full(n_ch, pitch, dtype=np.float64)
         else:
-            cell_sizes = np.asarray(sizes, dtype=np.float64).reshape(-1).copy()
+            sizes = np.asarray(sizes, dtype=np.float64)
+            if sizes.ndim == 2:
+                widths, heights = sizes[:, 0].copy(), sizes[:, 1].copy()
+            else:
+                widths = sizes.reshape(-1).copy()
+                heights = widths.copy()
             # Zero / missing electrode size → fall back to the pitch.
-            cell_sizes[~(cell_sizes > 0)] = pitch
+            widths[~(widths > 0)] = pitch
+            heights[~(heights > 0)] = pitch
 
-    y0 = -(ys + cell_sizes) if invert_y else ys
-    rects = np.column_stack([xs, y0, cell_sizes])
-    centers = np.column_stack([xs + cell_sizes / 2.0, y0 + cell_sizes / 2.0])
+    y0 = -(ys + heights) if invert_y else ys
+    rects = np.column_stack([xs, y0, widths, heights])
+    centers = np.column_stack([xs + widths / 2.0, y0 + heights / 2.0])
     return rects, centers
 
 
 def build_quad_mesh_arrays(rects: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Vertex positions ``(n*4, 3)`` and triangle indices ``(n*2, 3)`` for the
-    per-channel quads described by ``rects`` (``(n, 3)`` of ``(x0, y0, side)``)."""
+    per-channel quads described by ``rects`` (``(n, 4)`` of ``(x0, y0, width, height)``)."""
     n = rects.shape[0]
-    # corner_xy[i, k] = lower-left[i] + corner[k] * side[i]
-    corner_xy = rects[:, None, :2] + _CORNERS[None, :, :] * rects[:, None, 2:3]
+    # corner_xy[i, k] = lower-left[i] + corner[k] * (width[i], height[i])
+    corner_xy = rects[:, None, :2] + _CORNERS[None, :, :] * rects[:, None, 2:4]
     positions = np.zeros((n * 4, 3), dtype=np.float32)
     positions[:, :2] = corner_xy.reshape(-1, 2)
     base = (np.arange(n) * 4)[:, None, None]
     indices = (base + _QUAD_TRIS[None, :, :]).reshape(-1, 3).astype(np.uint32)
     return positions, indices
+
+
+@dataclass(frozen=True)
+class Outline:
+    """Line segments drawn over a grid, in the same space as its positions.
+
+    ``segments`` is ``(k, 2, 2)``: ``k`` segments of two ``(x, y)`` points.
+    Cell borders, the boundaries inside a cell, or anything else a caller
+    wants to show on top of the channels.
+    """
+
+    segments: np.ndarray
+    color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    thickness: float = 1.0
+
+
+def outline_vertices(segments: np.ndarray, invert_y: bool, z: float = 0.5) -> np.ndarray:
+    """``(k, 2, 2)`` segments as one ``(3k, 3)`` polyline, NaN rows between segments.
+
+    Flipped like :func:`resolve_cell_geometry` flips the cells, so outlines
+    given in position space land on the cells they describe.
+    """
+    segments = np.asarray(segments, dtype=np.float32).reshape(-1, 2, 2)
+    out = np.full((segments.shape[0], 3, 3), np.nan, dtype=np.float32)
+    out[:, :2, :2] = segments
+    if invert_y:
+        out[:, :2, 1] *= -1.0
+    out[:, :2, 2] = z
+    return out.reshape(-1, 3)
