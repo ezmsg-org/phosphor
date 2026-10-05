@@ -30,7 +30,7 @@ import fastplotlib as fpl
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 
-from .grid_layout import build_quad_mesh_arrays, resolve_cell_geometry
+from .grid_layout import Outline, build_quad_mesh_arrays, outline_vertices, resolve_cell_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,14 @@ class ChannelGridConfig:
     same units as ``sizes`` (micrometers for a CMP/device-mapped source)."""
 
     sizes: np.ndarray | None = None
-    """``(n_ch,)`` per-channel square side length. ``None`` (or a non-positive
-    entry) falls back to the inferred electrode pitch so squares tile their
-    cells, matching the old full-cell heatmap look."""
+    """``(n_ch,)`` per-channel square side length, or ``(n_ch, 2)`` widths and
+    heights for rectangles. ``None`` (or a non-positive entry) falls back to
+    the inferred electrode pitch so squares tile their cells, matching the old
+    full-cell heatmap look."""
+
+    outlines: tuple[Outline, ...] = ()
+    """Line segments drawn over the cells, in the same space as ``positions``
+    (cell borders, boundaries inside a cell)."""
 
     channel_labels: list[str] | None = None
     cmap: str = "viridis_r"
@@ -78,7 +83,7 @@ class ChannelGridConfig:
 
 
 class ChannelGridWidget(QtWidgets.QWidget):
-    """Embeddable grid: one square per channel at its electrode position,
+    """Embeddable grid: one rectangle per channel at its electrode position,
     color-mapped by value, with optional value text and a channel tooltip."""
 
     def __init__(self, config: ChannelGridConfig, parent: QtWidgets.QWidget | None = None) -> None:
@@ -86,9 +91,9 @@ class ChannelGridWidget(QtWidgets.QWidget):
         self._config = config
         n_ch = config.positions.shape[0]
 
-        # Per-channel display rectangles: (x0, y0, side) with (x0, y0) the
-        # lower-left corner in display space (already y-flipped if requested),
-        # plus square centers for value text and tooltip hit-testing.
+        # Per-channel display rectangles: (x0, y0, width, height) with (x0, y0)
+        # the lower-left corner in display space (already y-flipped if
+        # requested), plus centers for value text and tooltip hit-testing.
         self._rects, self._centers = self._resolve_geometry(config, n_ch)
 
         self._values_per_ch = np.full(n_ch, np.nan, dtype=np.float32)
@@ -113,6 +118,7 @@ class ChannelGridWidget(QtWidgets.QWidget):
         positions, indices = self._build_mesh_arrays()
         init_colors = np.tile(self._nan_rgba, (positions.shape[0], 1))
         self._mesh = self._subplot.add_mesh(positions, indices, mode="basic", colors=init_colors)
+        self._add_outlines(config.outlines, config.invert_y)
 
         self._text_graphics: list = []
         if self._show_values:
@@ -248,6 +254,19 @@ class ChannelGridWidget(QtWidgets.QWidget):
         """
         return resolve_cell_geometry(config.positions, config.sizes, n_ch, config.invert_y)
 
+    def _add_outlines(self, outlines, invert_y: bool) -> None:
+        """Draw each :class:`Outline` above the cells, in their position space."""
+        self._outline_graphics = []
+        for outline in outlines or ():
+            if len(outline.segments) == 0:
+                continue
+            line = self._subplot.add_line(
+                outline_vertices(outline.segments, invert_y),
+                colors=outline.color,
+                thickness=outline.thickness,
+            )
+            self._outline_graphics.append(line)
+
     def _build_mesh_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         """Vertex positions ``(n*4, 3)`` and triangle indices ``(n*2, 3)`` for
         the per-channel quads."""
@@ -311,11 +330,9 @@ class ChannelGridWidget(QtWidgets.QWidget):
         return rgba
 
     def _channel_at(self, wx: float, wy: float) -> int:
-        """Index of the square containing world point ``(wx, wy)``, or -1."""
-        x0 = self._rects[:, 0]
-        y0 = self._rects[:, 1]
-        side = self._rects[:, 2]
-        inside = (wx >= x0) & (wx <= x0 + side) & (wy >= y0) & (wy <= y0 + side)
+        """Index of the rectangle containing world point ``(wx, wy)``, or -1."""
+        x0, y0, width, height = self._rects.T
+        inside = (wx >= x0) & (wx <= x0 + width) & (wy >= y0) & (wy <= y0 + height)
         hits = np.flatnonzero(inside)
         return int(hits[0]) if hits.size else -1
 

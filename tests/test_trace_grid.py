@@ -36,7 +36,7 @@ def make_widget(n_ch=2, n_samples=4, history=3, **config_kwargs) -> TraceGridWid
     # The real _map_y, not a stub. It is per channel, and stubbing it is what
     # let a band of 2 x n_ch rows reach it and raise on every frame while the
     # tests stayed green.
-    w._rects = np.column_stack([np.zeros(n_ch), np.arange(n_ch, dtype=float), np.ones(n_ch)])
+    w._rects = np.column_stack([np.zeros(n_ch), np.arange(n_ch, dtype=float), np.ones(n_ch), np.ones(n_ch)])
     w._y_min, w._y_max = -1000.0, 1000.0
     return w
 

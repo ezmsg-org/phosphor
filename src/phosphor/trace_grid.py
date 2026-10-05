@@ -26,7 +26,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .decimate import minmax_decimate, minmax_decimate_x, plan_minmax_decimation
-from .grid_layout import build_quad_mesh_arrays, resolve_cell_geometry
+from .grid_layout import Outline, build_quad_mesh_arrays, outline_vertices, resolve_cell_geometry
 from .trace_grid_buffer import TraceGridBuffer
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,11 @@ class TraceGridConfig:
     """Number of samples per waveform (epoch window length)."""
 
     sizes: np.ndarray | None = None
-    """``(n_ch,)`` per-channel cell side length; ``None`` → inferred pitch."""
+    """``(n_ch,)`` per-channel cell side length, or ``(n_ch, 2)`` widths and
+    heights; ``None`` → inferred pitch."""
+
+    outlines: tuple[Outline, ...] = ()
+    """Line segments drawn over the cells, in the same space as ``positions``."""
 
     channel_labels: list[str] | None = None
     history: int = 10
@@ -144,7 +148,7 @@ class TraceGridWidget(QtWidgets.QWidget):
         self._y_min = float(config.y_min)
         self._y_max = float(config.y_max)
 
-        # Per-channel display rects (x0, y0, side) and centers, shared layout.
+        # Per-channel display rects (x0, y0, width, height) and centers, shared layout.
         self._rects, self._centers = resolve_cell_geometry(config.positions, config.sizes, self._n_ch, config.invert_y)
         # Precompute the per-channel x coordinate of each sample inside its cell.
         self._x_line = self._compute_x_line()  # (n_ch, n_samples)
@@ -205,6 +209,7 @@ class TraceGridWidget(QtWidgets.QWidget):
         bg_positions, bg_indices = build_quad_mesh_arrays(self._rects)
         bg_colors = np.tile(np.asarray(config.cell_color, dtype=np.float32), (bg_positions.shape[0], 1))
         self._bg_mesh = self._subplot.add_mesh(bg_positions, bg_indices, mode="basic", colors=bg_colors)
+        self._add_outlines(config.outlines, config.invert_y)
 
         self._indiv_ml = None
         self._mean_ml = None
@@ -391,7 +396,7 @@ class TraceGridWidget(QtWidgets.QWidget):
 
     def _compute_x_line(self) -> np.ndarray:
         x0 = self._rects[:, 0]
-        side = self._rects[:, 2]
+        side = self._rects[:, 2]  # cell width
         pad = self._config.cell_pad_frac
         inner = side * (1.0 - 2.0 * pad)
         if self._n_samples > 1:
@@ -404,7 +409,7 @@ class TraceGridWidget(QtWidgets.QWidget):
     def _map_y(self, values: np.ndarray) -> np.ndarray:
         """Map amplitude *values* (..., n_ch, n_samples) into per-cell y."""
         y0 = self._rects[:, 1]
-        side = self._rects[:, 2]
+        side = self._rects[:, 3]  # cell height
         pad = self._config.cell_pad_frac
         inner = side * (1.0 - 2.0 * pad)
         span = max(self._y_max - self._y_min, 1e-12)
@@ -694,13 +699,24 @@ class TraceGridWidget(QtWidgets.QWidget):
             )
             self._mean_ml.visible = self._show_mean
 
+    def _add_outlines(self, outlines, invert_y: bool) -> None:
+        """Draw each :class:`Outline` above the cells, in their position space."""
+        self._outline_graphics = []
+        for outline in outlines or ():
+            if len(outline.segments) == 0:
+                continue
+            line = self._subplot.add_line(
+                outline_vertices(outline.segments, invert_y),
+                colors=outline.color,
+                thickness=outline.thickness,
+            )
+            self._outline_graphics.append(line)
+
     # ---- Tooltip / hit-testing -----------------------------------------
 
     def _channel_at(self, wx: float, wy: float) -> int:
-        x0 = self._rects[:, 0]
-        y0 = self._rects[:, 1]
-        side = self._rects[:, 2]
-        inside = (wx >= x0) & (wx <= x0 + side) & (wy >= y0) & (wy <= y0 + side)
+        x0, y0, width, height = self._rects.T
+        inside = (wx >= x0) & (wx <= x0 + width) & (wy >= y0) & (wy <= y0 + height)
         hits = np.flatnonzero(inside)
         return int(hits[0]) if hits.size else -1
 
