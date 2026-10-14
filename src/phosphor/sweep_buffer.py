@@ -49,6 +49,10 @@ class SweepBuffer:
         # autoscale. >1 makes waves taller (may clip into adjacent rows);
         # <1 makes them flatter. Channel row positions are not affected.
         self._amplitude_scale = float(amplitude_scale)
+        # Data-driven normalization (``_y_scale``) refits to the visible peak
+        # while True; when False it is frozen, so only the user moves the scale.
+        self._autoscale = True
+        self._y_scale = 1.0
 
         self._lock = threading.Lock()
         self._version = 0
@@ -363,6 +367,38 @@ class SweepBuffer:
             self._amplitude_scale = scale
             self._mark_all_dirty()
 
+    @property
+    def autoscale(self) -> bool:
+        return self._autoscale
+
+    def set_autoscale(self, enabled: bool) -> None:
+        """Refit the scale to the data (True) or hold it where it is (False).
+
+        Re-enabling refits immediately rather than waiting for the next sweep.
+        """
+        with self._lock:
+            self._autoscale = bool(enabled)
+            if self._autoscale:
+                self._y_scale = self._compute_y_scale()
+                self._ch_mid = self._compute_ch_mid(self._y_scale)
+                self._mark_all_dirty()
+
+    @property
+    def y_range(self) -> float:
+        """Data value drawn at a row's half-band edge: each row spans ``±y_range``."""
+        return 0.5 / (self._y_scale * self._amplitude_scale)
+
+    def set_y_range(self, half_range: float) -> None:
+        """Fix each row to ``±half_range`` data units. Turns autoscale off."""
+        half_range = float(half_range)
+        if not np.isfinite(half_range) or half_range <= 0:
+            raise ValueError(f"y range must be a positive number, got {half_range!r}")
+        with self._lock:
+            self._autoscale = False
+            self._y_scale = 0.5 / (half_range * self._amplitude_scale)
+            self._ch_mid = self._compute_ch_mid(self._y_scale)
+            self._mark_all_dirty()
+
     def set_channel_order(self, order: str) -> None:
         if order not in ("top_down", "bottom_up"):
             raise ValueError(f"channel_order must be 'top_down' or 'bottom_up', got {order!r}")
@@ -379,7 +415,8 @@ class SweepBuffer:
         and Z-coordinates encode channel index for z_offset_scale separation.
         """
         with self._lock:
-            self._y_scale = self._compute_y_scale()
+            if self._autoscale:
+                self._y_scale = self._compute_y_scale()
             self._ch_mid = self._compute_ch_mid(self._y_scale)
             out = self._build_multiline_array(
                 self.display_mins,
@@ -401,9 +438,9 @@ class SweepBuffer:
             if self._dirty_start is None:
                 return None
 
-            # Check if scale drifted significantly
-            new_scale = self._compute_y_scale()
-            old_scale = getattr(self, "_y_scale", new_scale)
+            # Check if scale drifted significantly. A fixed scale never moves.
+            old_scale = self._y_scale
+            new_scale = self._compute_y_scale() if self._autoscale else old_scale
             if old_scale > 0 and abs(new_scale - old_scale) / old_scale > 0.2:
                 # Full update with new scale
                 self._y_scale = new_scale

@@ -20,7 +20,8 @@ class ChannelPlotWidget(QWidget):
     """Base widget for fastplotlib-rendered multichannel plots.
 
     Provides canvas setup, channel scrolling (scroll / ↑↓ / PgUp/PgDn / [ ]),
-    amplitude zoom (Shift+scroll / - =), and range label overlay.
+    amplitude zoom (Shift+scroll / - =), the autoscale toggle (A) where the
+    buffer supports one, and range label overlay.
 
     Subclass contract:
 
@@ -333,6 +334,8 @@ class ChannelPlotWidget(QWidget):
             self._zoom_amplitude(0.8)
         elif key == "=":
             self._zoom_amplitude(1.25)
+        elif key in ("a", "A") and hasattr(buf, "set_autoscale"):
+            buf.set_autoscale(not buf.autoscale)
 
         self._update_range_label()
 
