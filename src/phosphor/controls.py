@@ -14,7 +14,7 @@ Usage::
 
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .channel_plot import ChannelPlotWidget
 
@@ -90,10 +90,46 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
 
         layout.addWidget(self._make_separator())
 
-        # Amplitude zoom (per-row waveform scale).
-        layout.addWidget(self._make_label("Amplitude"))
-        layout.addWidget(self._make_button("\u2212", "Shrink amplitude", lambda: self._plot._zoom_amplitude(0.8)))
-        layout.addWidget(self._make_button("+", "Grow amplitude", lambda: self._plot._zoom_amplitude(1.25)))
+        # Amplitude zoom (per-row waveform scale), plus an editable range and
+        # an autoscale toggle where the buffer supports a fixed scale.
+        has_range = hasattr(buf, "set_y_range")
+        keys = "Keys: - shrink, = grow, Shift+scroll zoom"
+        if has_range:
+            keys += ", A toggle autoscale"
+        amp_label = self._make_label("Amplitude")
+        amp_label.setToolTip(keys)
+        layout.addWidget(amp_label)
+        layout.addWidget(
+            self._make_button("\u2212", f"Shrink amplitude\n{keys}", lambda: self._plot._zoom_amplitude(0.8))
+        )
+        self._edit_range: QtWidgets.QLineEdit | None = None
+        self._unit_label: QtWidgets.QLabel | None = None
+        self._btn_auto: QtWidgets.QToolButton | None = None
+        if has_range:
+            layout.addWidget(self._make_label("\u00b1"))
+            self._edit_range = QtWidgets.QLineEdit()
+            self._edit_range.setFixedWidth(64)
+            validator = QtGui.QDoubleValidator(self._edit_range)
+            validator.setBottom(0.0)
+            self._edit_range.setValidator(validator)
+            self._edit_range.setToolTip(
+                f"Each row spans \u00b1 this value. Type a value and press Enter to fix it"
+                f" (turns autoscale off).\n{keys}"
+            )
+            self._edit_range.editingFinished.connect(self._on_range_committed)
+            layout.addWidget(self._edit_range)
+            self._unit_label = self._make_label("")
+            self._unit_label.hide()
+            layout.addWidget(self._unit_label)
+        layout.addWidget(self._make_button("+", f"Grow amplitude\n{keys}", lambda: self._plot._zoom_amplitude(1.25)))
+        if has_range:
+            self._btn_auto = QtWidgets.QToolButton()
+            self._btn_auto.setText("Auto")
+            self._btn_auto.setCheckable(True)
+            self._btn_auto.setChecked(buf.autoscale)
+            self._btn_auto.setToolTip(f"Refit the amplitude range to the visible data\n{keys}")
+            self._btn_auto.toggled.connect(buf.set_autoscale)
+            layout.addWidget(self._btn_auto)
         self._mark_slot("amplitude", layout)
 
         # Time zoom — only present if the plot supports it (sweep / spectrum).
@@ -159,6 +195,13 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
             if pos >= index:
                 self._slots[name] = pos + 1
 
+    def set_amplitude_unit(self, unit: str | None) -> None:
+        """Label the amplitude range with the signal's unit; empty hides it."""
+        if self._unit_label is None:
+            return
+        self._unit_label.setText(unit or "")
+        self._unit_label.setVisible(bool(unit))
+
     def _mark_slot(self, name: str, layout: QtWidgets.QHBoxLayout) -> None:
         """Record the current end of *layout* as the named insertion point."""
         self._slots[name] = layout.count()
@@ -222,6 +265,22 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         buf.set_n_visible(min(buf.n_channels, buf.n_visible * 2))
         self._plot._update_range_label()
 
+    # ---- amplitude range ---------------------------------------------
+
+    def _on_range_committed(self) -> None:
+        # editingFinished also fires on focus-out; an untouched field must not
+        # turn autoscale off.
+        if not self._edit_range.isModified():
+            return
+        try:
+            value = float(self._edit_range.text())
+        except ValueError:
+            return
+        if value > 0:
+            self._plot._buffer.set_y_range(value)
+        self._edit_range.clearFocus()  # hand the keys back to the plot
+        self._sync_from_buffer()
+
     # ---- periodic resync ---------------------------------------------
 
     def _sync_from_buffer(self) -> None:
@@ -233,6 +292,14 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
             self._spin_visible.setRange(1, buf.n_channels)
             self._spin_visible.setValue(buf.n_visible)
             self._spin_visible.blockSignals(False)
+        if self._edit_range is not None and not self._edit_range.hasFocus():
+            text = f"{buf.y_range:.4g}"
+            if self._edit_range.text() != text:
+                self._edit_range.setText(text)
+        if self._btn_auto is not None and self._btn_auto.isChecked() != buf.autoscale:
+            self._btn_auto.blockSignals(True)
+            self._btn_auto.setChecked(buf.autoscale)
+            self._btn_auto.blockSignals(False)
         if self._btn_labels.isChecked() != self._plot.channel_labels_visible:
             self._btn_labels.blockSignals(True)
             self._btn_labels.setChecked(self._plot.channel_labels_visible)

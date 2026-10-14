@@ -272,3 +272,41 @@ def test_time_zoom_preserves_the_envelope_pair_axis():
     assert buf.raw_buffer.ndim == 3
     assert buf.raw_buffer.shape[1:] == (4, 2)
     assert buf.display_maxs.max() == pytest.approx(3.0)
+
+
+# ---- fixed amplitude range --------------------------------------------------
+
+
+def test_a_fixed_scale_does_not_refit_when_the_signal_grows():
+    """With autoscale off the scale must stay where the user put it, through
+    both the drift check and the full rebuild a sweep wrap triggers."""
+    buf = make_buffer()
+    buf.push_data(np.full((500, 4), 1.0, dtype=np.float32))
+    buf.get_multiline_data()
+    buf.set_y_range(2.0)
+    assert not buf.autoscale
+
+    buf.push_data(np.full((1000, 4), 50.0, dtype=np.float32))  # wraps, 50x larger
+    buf.get_dirty_multiline_range()
+    buf.get_multiline_data()
+    assert buf.y_range == pytest.approx(2.0)
+
+
+def test_autoscale_refits_and_y_range_includes_the_amplitude_zoom():
+    buf = make_buffer()
+    buf.push_data(np.full((500, 4), 1.0, dtype=np.float32))
+    buf.get_multiline_data()
+    assert buf.y_range == pytest.approx(1.0)
+
+    buf.set_amplitude_scale(2.0)
+    assert buf.y_range == pytest.approx(0.5), "zooming in shows half the range per row"
+
+    buf.set_y_range(10.0)
+    buf.set_autoscale(True)  # re-enabling refits immediately
+    assert buf.y_range == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_set_y_range_rejects_non_positive_values(bad):
+    with pytest.raises(ValueError):
+        make_buffer().set_y_range(bad)
