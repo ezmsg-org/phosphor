@@ -300,8 +300,14 @@ class SweepWidget(ChannelPlotWidget):
         color_stride = ml.colors.value.shape[0] // EVENT_POOL_SIZE
         colors = np.zeros((EVENT_POOL_SIZE * color_stride, 4), dtype=np.float32)
         n_active = 0
+        # Column c holds the samples from c/n_columns of the sweep but is drawn
+        # at c/(n_columns - 1) of it (the cursor too), so stretch event times
+        # the same way; unscaled, a line drifts up to one column left of its
+        # samples toward the right edge.
+        x_scale = buf.n_columns / max(buf.n_columns - 1, 1)
 
         for ev, x_pos in visible_events:
+            x_pos *= x_scale
             if n_active >= EVENT_POOL_SIZE:
                 break
 
