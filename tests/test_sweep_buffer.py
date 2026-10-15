@@ -310,3 +310,85 @@ def test_autoscale_refits_and_y_range_includes_the_amplitude_zoom():
 def test_set_y_range_rejects_non_positive_values(bad):
     with pytest.raises(ValueError):
         make_buffer().set_y_range(bad)
+
+
+# ---- events: time -> x, and what may be drawn --------------------------------
+#
+# make_buffer() is 1000 Hz over 1 s, so the ring holds 1000 samples and a
+# sample's x (seconds) is its ring position / 1000.
+
+from phosphor.sweep_buffer import SweepEvent  # noqa: E402
+
+
+def push_at(buf: SweepBuffer, t0: float, n: int) -> None:
+    buf.push_data(np.zeros((n, 4), dtype=np.float32), timestamps=t0)
+
+
+def visible_x(buf: SweepBuffer) -> dict[float, float]:
+    return {ev.t_elapsed: x for ev, x in buf.get_visible_events()}
+
+
+def test_an_event_lands_on_the_sample_with_its_time():
+    buf = make_buffer()
+    push_at(buf, 10.0, 500)
+    buf.push_events([SweepEvent(10.2)])
+    assert visible_x(buf) == {10.2: pytest.approx(0.2)}
+
+
+def test_an_event_ahead_of_its_samples_waits_for_them():
+    buf = make_buffer()
+    push_at(buf, 10.0, 500)
+    buf.push_events([SweepEvent(10.7)])
+    assert visible_x(buf) == {}
+    push_at(buf, 10.5, 500)
+    assert visible_x(buf) == {10.7: pytest.approx(0.7)}
+
+
+def test_events_wrap_with_the_sweep_and_age_out():
+    buf = make_buffer()
+    for t0 in (10.0, 10.5, 11.0):
+        push_at(buf, t0, 500)
+    buf.push_events([SweepEvent(10.4), SweepEvent(10.6), SweepEvent(11.2)])
+    # 10.4 is older than the 1 s window; 10.6 sits after the cursor (x 0.5).
+    assert visible_x(buf) == {10.6: pytest.approx(0.6), 11.2: pytest.approx(0.2)}
+
+
+def test_timestamp_jitter_is_not_a_time_jump():
+    buf = make_buffer()
+    push_at(buf, 10.0, 500)
+    push_at(buf, 10.501, 500)
+    buf.push_events([SweepEvent(10.2)])
+    assert set(visible_x(buf)) == {10.2}
+
+
+def test_a_seek_back_hides_events_that_would_land_on_samples_from_before_it():
+    buf = make_buffer()
+    push_at(buf, 10.0, 1000)
+    buf.push_events([SweepEvent(10.8)])
+    push_at(buf, 5.0, 200)  # NWB scrubbed back to 5 s
+    buf.push_events([SweepEvent(4.9), SweepEvent(5.1)])
+    # 10.8 is in the future again; 4.9 is within the window, but the samples
+    # 0.1-0.3 s behind the cursor are from before the seek.
+    assert visible_x(buf) == {5.1: pytest.approx(0.1)}
+
+
+def test_replayed_events_are_stored_once():
+    buf = make_buffer()
+    push_at(buf, 10.0, 500)
+    buf.push_events([SweepEvent(10.2, label="tone")])
+    buf.push_events([SweepEvent(10.2, label="tone"), SweepEvent(10.2, label="cue")])
+    assert sorted(ev.label for ev, _ in buf.get_visible_events()) == ["cue", "tone"]
+
+
+def test_clear_events():
+    buf = make_buffer()
+    push_at(buf, 10.0, 500)
+    buf.push_events([SweepEvent(10.2)])
+    buf.clear_events()
+    assert buf.get_visible_events() == []
+
+
+def test_a_chunk_longer_than_the_ring_still_dates_its_end():
+    buf = make_buffer()
+    push_at(buf, 0.0, 1500)
+    assert buf.elapsed_time == pytest.approx(1.5)

@@ -14,6 +14,9 @@ CURSOR_COLOR = (0.25, 0.25, 0.28, 0.85)
 CURSOR_THICKNESS = 2.0
 
 DEFAULT_MAX_EVENTS = 500  # max stored events (deque capacity)
+# A chunk whose first timestamp is this far (s) from where the previous chunk
+# ended starts a new time base: an NWB seek, or samples a source dropped.
+TIME_JUMP_TOLERANCE = 0.1
 EVENT_POOL_SIZE = 64  # max simultaneously rendered event ticks
 EVENT_COLOR = (1.0, 1.0, 1.0, 1.0)  # default white
 EVENT_THICKNESS = 2.0
