@@ -134,6 +134,10 @@ class SweepWidget(ChannelPlotWidget):
         """Push discrete events for overlay rendering."""
         self.sweep_buffer.push_events(events)
 
+    def clear_events(self) -> None:
+        """Drop every event, e.g. when the caller changes which events it shows."""
+        self.sweep_buffer.clear_events()
+
     def update_config(self, config: SweepConfig) -> None:
         """Update configuration at runtime (e.g. on reconnect)."""
         self._config = config

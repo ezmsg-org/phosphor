@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .constants import DEFAULT_MAX_EVENTS
+from .constants import DEFAULT_MAX_EVENTS, TIME_JUMP_TOLERANCE
 
 
 @dataclass
@@ -91,6 +91,10 @@ class SweepBuffer:
 
         self.write_pos = 0
         self.sweep_col = 0
+        # Time at which the samples on screen became continuous; an event
+        # earlier than this would be drawn over samples from another time.
+        # The ring is empty again, so nothing earlier than now is on screen.
+        self._continuous_since = self._elapsed
 
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
@@ -145,7 +149,7 @@ class SweepBuffer:
             elif data.ndim != 2:
                 raise ValueError(f"expected (n_samples, n_channels), got {data.shape}. Did you mean envelope=True?")
 
-            n_samples = data.shape[0]
+            n_samples = n_pushed = data.shape[0]
             n_ch = data.shape[1]
 
             # Handle channel count mismatch. Pad/trim the channel axis only;
@@ -194,16 +198,23 @@ class SweepBuffer:
 
             # Track elapsed time and write position
             self._samples_since_alloc += n_samples
+            previous_end = self._elapsed
             if timestamps is None:
+                first_t = self._elapsed
                 self._elapsed += n_samples / self.srate
             elif np.ndim(timestamps) == 0:
-                # Scalar: time of first sample in chunk.
-                self._elapsed = float(timestamps) + n_samples / self.srate
+                # Scalar: time of first sample in chunk. n_pushed, not the
+                # truncated count, since the scalar dates the whole chunk.
+                first_t = float(timestamps)
+                self._elapsed = first_t + n_pushed / self.srate
             else:
                 # Per-sample array: last entry + one sample period so
                 # _elapsed is the exclusive end, consistent with the
                 # scalar and sample-counting cases.
+                first_t = float(timestamps[0])
                 self._elapsed = float(timestamps[-1]) + 1.0 / self.srate
+            if abs(first_t - previous_end) > TIME_JUMP_TOLERANCE:
+                self._continuous_since = first_t
 
             # Mark dirty
             self._mark_dirty(first_col, last_col)
@@ -615,18 +626,33 @@ class SweepBuffer:
             return self._elapsed
 
     def push_events(self, events: list[SweepEvent]) -> None:
-        """Add events to the store. Thread-safe."""
+        """Add events to the store. Thread-safe.
+
+        An event already stored is skipped, so a replay that passes the same
+        events again (an NWB seek back) does not draw each one twice.
+        """
         with self._lock:
-            self._events.extend(events)
+            self._events.extend(ev for ev in events if ev not in self._events)
+            self._events_dirty = True
+
+    def clear_events(self) -> None:
+        """Drop every stored event. Thread-safe."""
+        with self._lock:
+            self._events.clear()
             self._events_dirty = True
 
     def get_visible_events(self) -> list[tuple[SweepEvent, float]]:
         """Return visible events with their x-positions. Thread-safe.
 
         Returns list of ``(event, x_position)`` for events within the current
-        display window.  The x-position is derived from the sample-based cursor
-        position so it stays aligned with the sweep data regardless of the
-        timestamp basis.
+        display window and since the last time jump (see
+        :data:`~phosphor.constants.TIME_JUMP_TOLERANCE`); an event from before
+        the jump would land on samples from another time.
+        Events later than the newest sample wait in the store until the data
+        catches up, so events may arrive before or after their samples.
+
+        The x-position is derived from the sample-based cursor position so it
+        stays aligned with the sweep data regardless of the timestamp basis.
         """
         with self._lock:
             elapsed = self._elapsed
@@ -640,7 +666,7 @@ class SweepBuffer:
             # visible events than pool slots.
             for ev in reversed(self._events):
                 age = elapsed - ev.t_elapsed
-                if 0 <= age < dur:
+                if 0 <= age < dur and ev.t_elapsed >= self._continuous_since:
                     x_pos = (cursor_time - age) % dur
                     result.append((ev, x_pos))
             self._events_dirty = False
