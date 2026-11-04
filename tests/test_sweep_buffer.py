@@ -310,6 +310,26 @@ def test_autoscale_refits_and_y_range_includes_the_amplitude_zoom():
 def test_set_y_range_rejects_non_positive_values(bad):
     with pytest.raises(ValueError):
         make_buffer().set_y_range(bad)
+    with pytest.raises(ValueError):
+        make_buffer(autoscale=False, y_range=bad)
+
+
+def test_initial_fixed_range_is_held_from_the_first_sweep():
+    """A rebuilt plot restores the range it had, including the amplitude zoom."""
+    buf = make_buffer(amplitude_scale=2.0, autoscale=False, y_range=3.0)
+    assert not buf.autoscale
+    assert buf.y_range == pytest.approx(3.0)
+    buf.push_data(np.full((500, 4), 50.0, dtype=np.float32))
+    buf.get_multiline_data()
+    assert buf.y_range == pytest.approx(3.0)
+
+
+def test_initial_y_range_is_only_a_start_when_autoscaling():
+    buf = make_buffer(y_range=3.0)
+    assert buf.autoscale
+    buf.push_data(np.full((500, 4), 1.0, dtype=np.float32))
+    buf.get_multiline_data()
+    assert buf.y_range == pytest.approx(1.0)
 
 
 # ---- events: time -> x, and what may be drawn --------------------------------
