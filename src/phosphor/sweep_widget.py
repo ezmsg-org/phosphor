@@ -48,6 +48,10 @@ class SweepConfig:
     colors: list[tuple[float, float, float, float]] | None = None
     # Initial waveform-amplitude multiplier (1.0 = data autoscale only).
     amplitude_scale: float = 1.0
+    # Initial amplitude fit. With ``autoscale`` off the rows hold a fixed
+    # ``±y_range`` (signal units, half a row); ``None`` keeps the buffer's own.
+    autoscale: bool = True
+    y_range: float | None = None
     # Pushed data is ``(n_samples, n_channels, 2)`` holding an already-reduced
     # (min, max) pair per sample, rather than raw values. Lets a producer
     # decimate near the source -- see ``SweepBuffer.push_data``.
@@ -99,6 +103,8 @@ class SweepWidget(ChannelPlotWidget):
             channel_order=config.channel_order,
             amplitude_scale=config.amplitude_scale,
             envelope=config.envelope,
+            autoscale=config.autoscale,
+            y_range=config.y_range,
         )
         self._buffer = self.sweep_buffer
         self._palette = list(config.colors) if config.colors is not None else list(SOFT_CHANNEL_COLORS)

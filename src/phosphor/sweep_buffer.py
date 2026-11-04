@@ -30,6 +30,8 @@ class SweepBuffer:
         channel_order: str = "top_down",
         amplitude_scale: float = 1.0,
         envelope: bool = False,
+        autoscale: bool = True,
+        y_range: float | None = None,
     ):
         # When True, pushed data is ``(n_samples, n_channels, 2)`` -- a
         # already-reduced (min, max) pair per sample rather than a raw value.
@@ -66,6 +68,11 @@ class SweepBuffer:
         self._events_dirty: bool = False
 
         self._allocate()
+
+        # Initial fixed range (validated even when autoscale will refit it).
+        if y_range is not None:
+            self.set_y_range(y_range)
+        self._autoscale = bool(autoscale)
 
     # ------------------------------------------------------------------
     # Buffer allocation
