@@ -412,3 +412,54 @@ def test_a_chunk_longer_than_the_ring_still_dates_its_end():
     buf = make_buffer()
     push_at(buf, 0.0, 1500)
     assert buf.elapsed_time == pytest.approx(1.5)
+
+
+# -- events stay on their sample ------------------------------------------------
+#
+# A line is matched to a sample once and drawn there. Placing it by how far its
+# time is behind the newest timestamp instead moves it whenever timestamps do
+# not advance by exactly n / srate per n samples.
+
+
+def stream(buf: SweepBuffer, t0: float, n_chunks: int, period: float, gap: float = 0.0, n: int = 100) -> float:
+    """Push chunks of per-sample times ``period`` apart, ``gap`` s lost between chunks."""
+    for _ in range(n_chunks):
+        buf.push_data(np.zeros((n, 4), dtype=np.float32), timestamps=t0 + np.arange(n) * period)
+        t0 += n * period + gap
+    return t0
+
+
+@pytest.mark.parametrize(
+    "period, gap",
+    [(1 / 990, 0.0), (1 / 1010, 0.0), (1 / 1000, 0.005)],
+    ids=["slow-source", "fast-source", "dropped-samples"],
+)
+def test_a_line_does_not_move_when_timestamps_do_not_follow_the_nominal_rate(period, gap):
+    buf = make_buffer()
+    t = stream(buf, 10.0, 3, period, gap)
+    buf.push_events([SweepEvent(10.0 + 150 * period + gap)])  # sample 150
+    seen = []
+    for _ in range(6):
+        seen.append(visible_x(buf))
+        t = stream(buf, t, 1, period, gap)
+    assert all(list(x.values()) == [pytest.approx(0.150)] for x in seen), seen
+
+
+def test_an_event_ahead_of_a_slow_source_lands_on_its_sample():
+    buf = make_buffer()
+    period = 1 / 990
+    t = stream(buf, 10.0, 2, period)
+    buf.push_events([SweepEvent(10.0 + 450 * period)])
+    assert visible_x(buf) == {}
+    stream(buf, t, 4, period)
+    assert list(visible_x(buf).values()) == [pytest.approx(0.450)]
+
+
+def test_a_line_stays_on_its_sample_through_a_time_zoom():
+    buf = make_buffer()
+    stream(buf, 10.0, 6, 1 / 990)
+    buf.push_events([SweepEvent(10.0 + 450 / 990)])
+    buf.set_display_dur(0.5)  # ring of 500: sample 450 is still in it
+    assert list(visible_x(buf).values()) == [pytest.approx(0.450)]
+    buf.set_display_dur(0.1)  # ring of 100: samples 500-599 only
+    assert visible_x(buf) == {}

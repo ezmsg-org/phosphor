@@ -63,8 +63,11 @@ class SweepBuffer:
         # the caller uses (sample-counting by default, or external timestamps).
         self._elapsed: float = 0.0
 
-        # Event storage
-        self._events: deque[SweepEvent] = deque(maxlen=max_events)
+        # Event storage: [event, sample index] pairs. The index counts samples
+        # since allocation and is set once, when the event's time is matched to
+        # a sample (-1 until then). The line is then drawn at that sample, so it
+        # cannot move against the data whatever the timestamps do afterwards.
+        self._events: deque[list] = deque(maxlen=max_events)
         self._events_dirty: bool = False
 
         self._allocate()
@@ -96,12 +99,16 @@ class SweepBuffer:
         self.display_mins = np.zeros((self.n_columns, self.n_channels), dtype=np.float32)
         self.display_maxs = np.zeros((self.n_columns, self.n_channels), dtype=np.float32)
 
+        # Time of each sample in raw_buffer, at the same ring position.
+        self._times = np.full(self.total_raw_samples, np.nan)
+
         self.write_pos = 0
         self.sweep_col = 0
-        # Time at which the samples on screen became continuous; an event
-        # earlier than this would be drawn over samples from another time.
-        # The ring is empty again, so nothing earlier than now is on screen.
-        self._continuous_since = self._elapsed
+        # Sample index at which the samples on screen became continuous; an
+        # event is only matched to samples from here on. The ring is empty
+        # again, so every event goes back to waiting for its sample.
+        self._continuous_index = 0
+        self._unpin_events()
 
         self._dirty_start: int | None = None
         self._dirty_end: int | None = None
@@ -170,9 +177,19 @@ class SweepBuffer:
 
             vis_data = data.astype(np.float32, copy=False)
 
+            # Per-sample times, whichever way the caller gave them.
+            previous_end = self._elapsed
+            if timestamps is None or np.ndim(timestamps) == 0:
+                first_t = previous_end if timestamps is None else float(timestamps)
+                times = first_t + np.arange(n_pushed) / self.srate
+            else:
+                times = np.asarray(timestamps, dtype=float)
+            first_t = float(times[0])  # before truncation: it dates a jump
+
             # Truncate if more data than one full sweep
             if n_samples > self.total_raw_samples:
                 vis_data = vis_data[-self.total_raw_samples :]
+                times = times[-self.total_raw_samples :]
                 n_samples = self.total_raw_samples
 
             # Track column range before writing
@@ -185,6 +202,7 @@ class SweepBuffer:
                 space = self.total_raw_samples - self.write_pos
                 chunk = min(remaining, space)
                 self.raw_buffer[self.write_pos : self.write_pos + chunk] = vis_data[src_off : src_off + chunk]
+                self._times[self.write_pos : self.write_pos + chunk] = times[src_off : src_off + chunk]
                 self.write_pos = (self.write_pos + chunk) % self.total_raw_samples
                 remaining -= chunk
                 src_off += chunk
@@ -204,24 +222,20 @@ class SweepBuffer:
             self.sweep_col = self._col_for_pos(self.write_pos)
 
             # Track elapsed time and write position
+            base = self._samples_since_alloc
             self._samples_since_alloc += n_samples
-            previous_end = self._elapsed
-            if timestamps is None:
-                first_t = self._elapsed
-                self._elapsed += n_samples / self.srate
-            elif np.ndim(timestamps) == 0:
-                # Scalar: time of first sample in chunk. n_pushed, not the
-                # truncated count, since the scalar dates the whole chunk.
-                first_t = float(timestamps)
-                self._elapsed = first_t + n_pushed / self.srate
-            else:
-                # Per-sample array: last entry + one sample period so
-                # _elapsed is the exclusive end, consistent with the
-                # scalar and sample-counting cases.
-                first_t = float(timestamps[0])
-                self._elapsed = float(timestamps[-1]) + 1.0 / self.srate
+            # Last sample + one period: the exclusive end of the data.
+            self._elapsed = float(times[-1]) + 1.0 / self.srate
+            half = 0.5 / self.srate
             if abs(first_t - previous_end) > TIME_JUMP_TOLERANCE:
-                self._continuous_since = first_t
+                # A new time base: what was matched belongs to the old one.
+                self._continuous_index = base
+                self._unpin_events()
+                after = float(times[0]) - half
+            else:
+                # Anything earlier was already offered to the samples before.
+                after = previous_end - 1.0 / self.srate + half
+            self._pin_events(times, base, after)
 
             # Mark dirty
             self._mark_dirty(first_col, last_col)
@@ -560,6 +574,7 @@ class SweepBuffer:
         old_total = self.total_raw_samples
         old_write_pos = self.write_pos
         old_raw = self.raw_buffer
+        old_times = self._times
 
         self.display_dur = new_dur
         new_total = max(int(round(self.srate * new_dur)), 1)
@@ -581,6 +596,7 @@ class SweepBuffer:
         # keeps both the full channel width and, in envelope mode, the trailing
         # (min, max) pair -- writing n_visible here silently mis-sized it.
         new_raw = np.zeros((new_total,) + self.raw_buffer.shape[1:], dtype=np.float32)
+        new_times = np.full(new_total, np.nan)
 
         # Copy data preserving sample ages
         available = min(self._samples_since_alloc, old_total)
@@ -589,26 +605,29 @@ class SweepBuffer:
         if keep > 0:
             # Extract `keep` most recent samples from old buffer (oldest first)
             old_start = (old_write_pos - keep) % old_total
-            if old_start + keep <= old_total:
-                old_data = old_raw[old_start : old_start + keep]
-            else:
-                first = old_total - old_start
-                old_data = np.concatenate([old_raw[old_start:], old_raw[: keep - first]])
-
-            # Insert into new buffer ending at new_write_pos - 1
             new_start = (new_write_pos - keep) % new_total
-            if new_start + keep <= new_total:
-                new_raw[new_start : new_start + keep] = old_data
-            else:
-                first = new_total - new_start
-                new_raw[new_start:] = old_data[:first]
-                new_raw[: keep - first] = old_data[first:]
+            # The sample times ride along at the same ring positions.
+            for old, new in ((old_raw, new_raw), (old_times, new_times)):
+                if old_start + keep <= old_total:
+                    old_data = old[old_start : old_start + keep]
+                else:
+                    first = old_total - old_start
+                    old_data = np.concatenate([old[old_start:], old[: keep - first]])
+
+                # Insert into new buffer ending at new_write_pos - 1
+                if new_start + keep <= new_total:
+                    new[new_start : new_start + keep] = old_data
+                else:
+                    first = new_total - new_start
+                    new[new_start:] = old_data[:first]
+                    new[: keep - first] = old_data[first:]
 
         # Update state
         self.total_raw_samples = new_total
         self.n_columns = new_n_columns
         self.samples_per_column = new_total / new_n_columns
         self.raw_buffer = new_raw
+        self._times = new_times
         self.write_pos = new_write_pos
         self.sweep_col = self._col_for_pos(new_write_pos)
 
@@ -639,8 +658,37 @@ class SweepBuffer:
         events again (an NWB seek back) does not draw each one twice.
         """
         with self._lock:
-            self._events.extend(ev for ev in events if ev not in self._events)
+            stored = [ev for ev, _ in self._events]
+            for ev in events:
+                if ev not in stored:
+                    stored.append(ev)
+                    self._events.append([ev, -1])
+            # Their samples may already be here: match against what the ring
+            # holds since the last time jump, oldest first.
+            n = min(self._samples_since_alloc - self._continuous_index, self.total_raw_samples)
+            if n > 0:
+                pos = (self.write_pos - n + np.arange(n)) % self.total_raw_samples
+                times = self._times[pos]
+                self._pin_events(times, self._samples_since_alloc - n, float(times[0]) - 0.5 / self.srate)
             self._events_dirty = True
+
+    def _unpin_events(self) -> None:
+        for item in self._events:
+            item[1] = -1
+
+    def _pin_events(self, times: np.ndarray, base: int, after: float) -> None:
+        """Match waiting events to the nearest sample of ``times`` (ascending;
+        ``times[0]`` is sample ``base``). An event later than the last sample
+        keeps waiting; one at or before ``after`` is not for these samples.
+        Must be called while holding ``_lock``."""
+        latest = float(times[-1]) + 0.5 / self.srate
+        for item in self._events:
+            t = item[0].t_elapsed
+            if item[1] < 0 and after < t <= latest:
+                i = min(int(np.searchsorted(times, t)), len(times) - 1)
+                if i > 0 and t - times[i - 1] <= times[i] - t:
+                    i -= 1
+                item[1] = base + i
 
     def clear_events(self) -> None:
         """Drop every stored event. Thread-safe."""
@@ -651,30 +699,25 @@ class SweepBuffer:
     def get_visible_events(self) -> list[tuple[SweepEvent, float]]:
         """Return visible events with their x-positions. Thread-safe.
 
-        Returns list of ``(event, x_position)`` for events within the current
-        display window and since the last time jump (see
-        :data:`~phosphor.constants.TIME_JUMP_TOLERANCE`); an event from before
-        the jump would land on samples from another time.
+        Returns list of ``(event, x_position)`` for events whose sample is
+        still in the ring. An event is matched once to the sample nearest its
+        time, among those since the last time jump (see
+        :data:`~phosphor.constants.TIME_JUMP_TOLERANCE`), and drawn at that
+        sample from then on: it stays on its data even when the timestamps
+        do not advance at exactly ``srate`` (a source whose true rate differs,
+        or one that drops samples).
         Events later than the newest sample wait in the store until the data
         catches up, so events may arrive before or after their samples.
-
-        The x-position is derived from the sample-based cursor position so it
-        stays aligned with the sweep data regardless of the timestamp basis.
         """
         with self._lock:
-            elapsed = self._elapsed
-            dur = self.display_dur
-            # cursor_time tracks the sweep cursor in seconds (sample-based),
-            # independent of the external timestamp basis.
-            cursor_time = self._samples_since_alloc / self.srate
+            total = self.total_raw_samples
+            oldest = self._samples_since_alloc - total
             result = []
             # Iterate newest-first so the render pool (which has a fixed
             # capacity) keeps the most recent events when there are more
             # visible events than pool slots.
-            for ev in reversed(self._events):
-                age = elapsed - ev.t_elapsed
-                if 0 <= age < dur and ev.t_elapsed >= self._continuous_since:
-                    x_pos = (cursor_time - age) % dur
-                    result.append((ev, x_pos))
+            for ev, index in reversed(self._events):
+                if index >= max(oldest, 0):
+                    result.append((ev, (index % total) / self.srate))
             self._events_dirty = False
             return result
